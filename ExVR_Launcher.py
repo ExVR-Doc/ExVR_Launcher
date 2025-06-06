@@ -1,7 +1,6 @@
 import os
 import sys
 import pyuac
-
 if not pyuac.isUserAdmin():
     pyuac.runAsAdmin()
     sys.exit(0)
@@ -17,7 +16,7 @@ import argparse
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
-
+#pyinstaller --name ExVR_Launcher --onefile --windowed --icon=./res/logo.ico --upx-dir=D:\software\upx-4.2.4-win64 launcher.py
 APP_NAME = "EXVR"
 APP_REG_PATH = r"SOFTWARE\EXVR"
 PYTHON_VERSION = "3.11"
@@ -70,6 +69,17 @@ def save_config(config):
         log(f"Error saving config: {e}")
         raise
 
+def delete_config():
+    config_path = get_config_file_path()
+    try:
+        if os.path.exists(config_path):
+            os.remove(config_path)
+            log(f"Config deleted: {config_path}")
+        else:
+            log("Config file does not exist.")
+    except Exception as e:
+        log(f"Error deleting config: {e}")
+        raise
 
 def get_install_path():
     config = load_config()
@@ -659,7 +669,9 @@ class InstallWorker(QThread):
                 # 使用ExVR注册表中的Python解释器
                 python_path = self._get_python_from_registry()
                 if not python_path:
+                    delete_config()
                     raise Exception("Python interpreter not found in ExVR registry")
+
 
                 self.process = subprocess.Popen(
                     [python_path, "-m", "venv", venv_path],
@@ -916,7 +928,6 @@ class SilentInstaller:
                             break
                 except Exception as e:
                     log(f"lau error: {e}")
-
             if remote_lau_version is not None and remote_lau_version > LAU_VERSION:
                 log(f"Launcher have update ({remote_lau_version})")
                 self._show_lau_board(remote_lau_board)
