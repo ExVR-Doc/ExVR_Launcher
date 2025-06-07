@@ -1,938 +1,1359 @@
-from PyQt5.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QLabel,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-    QLineEdit,
-    QComboBox,
-    QHBoxLayout,
-    QFrame,
-    QCheckBox,
-    QSlider,
-    QMessageBox,
-    QDialog,
-    QScrollArea,
-    QGridLayout, QSizePolicy
-)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
-from PyQt5.QtGui import QImage, QPixmap, QDoubleValidator
-
-import sys, winreg, shutil
+import os
+import sys
 import pyuac
-import cv2
-import utils.tracking
-from utils.actions import *
-import utils.globals as g
-from utils.data import setup_data,save_data
-from utils.hotkeys import stop_hotkeys, apply_hotkeys
-from tracker.face.face import draw_face_landmarks
-from tracker.face.tongue import draw_tongue_position
-from tracker.hand.hand import draw_hand_landmarks
-from ctypes import windll
-from cv2_enumerate_cameras import enumerate_cameras
-from tracker.controller.controller import *
-import numpy as np
-import warnings
-warnings.filterwarnings("ignore")
+import json
+import time
+import shutil
+import tempfile
+import subprocess
+import re
+import zipfile
+import requests
+import argparse
+from PySide6.QtWidgets import *
+from PySide6.QtCore import *
+from PySide6.QtGui import *
+
+#pyinstaller --name ExVR_Launcher --onefile --windowed --icon=./res/logo.ico --upx-dir=D:\software\upx-4.2.4-win64 launcher.py
+
+def get_config_file_path():
+    return get_resource_path("exvr_config.json")
+
+def load_config():
+    config_path = get_config_file_path()
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            log(f"Error loading config: {e}")
+    return {}
 
 
-class VideoCaptureThread(QThread):
-    frame_ready = pyqtSignal(QImage)
+def save_config(config):
+    config_path = get_config_file_path()
+    try:
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        log(f"Config saved to: {config_path}")
+    except Exception as e:
+        log(f"Error saving config: {e}")
+        raise
 
-    def __init__(self, source,width=640, height=480, fps=60):
-        super().__init__()
-        self.source = source
-        self.video_capture = None
-        self.is_running = True
-        self.show_image = False
-        self.tracker = utils.tracking.Tracker()
-        if width < 640 or height < 480:
-            aspect_ratio = width / height
-            if aspect_ratio == 1280 / 720:
-                self.width, self.height = 1280, 720
-            elif aspect_ratio == 640 / 480:
-                self.width, self.height = 640, 480
-            else:
-                self.width, self.height = width, height
+def delete_config():
+    config_path = get_config_file_path()
+    try:
+        if os.path.exists(config_path):
+            os.remove(config_path)
+            log(f"Config deleted: {config_path}")
         else:
-            self.width, self.height = width, height
-        self.fps = fps
+            log("Config file does not exist.")
+    except Exception as e:
+        log(f"Error deleting config: {e}")
+        raise
+APP_NAME = "EXVR"
+APP_REG_PATH = r"SOFTWARE\EXVR"
+PYTHON_VERSION = "3.11"
+PYTHON_DOWNLOAD_URL = "https://mirrors.huaweicloud.com/python/3.11.9/python-3.11.9-amd64.exe"
+GITHUB2_API_URL = "https://api.github.com/repos/{owner}/{repo}/releases/latest"
+GITHUB_API_URL = "https://gh-proxy.com/https://api.github.com/repos/{owner}/{repo}/releases/latest"
+UPDATE_CHECK_URLS = [
+    "https://gh-proxy.com/raw.githubusercontent.com/ExVR-Doc/ExVR-Doc.github.io/main/docs/exvrserverdata.json",
+    "https://gh-proxy.com/https://raw.githubusercontent.com/ExVR-Doc/ExVR-Doc.github.io/main/docs/exvrserverdata.json",
+    "https://hub.gitmirror.com/https://raw.githubusercontent.com/ExVR-Doc/ExVR-Doc.github.io/main/docs/exvrserverdata.json",
+    "https://raw.githubusercontent.com/ExVR-Doc/ExVR-Doc.github.io/main/docs/exvrserverdata.json"
+]
+GITHUB_REPO_OWNER = "xiaofeiyu0723"
+GITHUB_REPO_NAME = "ExVR"
+CUSTOM_FOLDER_NAME = "config"
+REQUEST_TIMEOUT = 10
+PYTHON_CHECK_TIMEOUT = 5
+IGNORED_FOLDERS = []
+LAU_VERSION = 1
+LAU_MAPPING = {
+    "modules\\palm_detection_lite.tflite": "mediapipe\\modules\\palm_detection\\palm_detection_lite.tflite",
+    "modules\\hand_landmark_tracking_cpu.binarypb": "mediapipe\\modules\\hand_landmark\\hand_landmark_tracking_cpu.binarypb",
+}
+server_data = {}
 
-    def run(self):
-        self.video_capture = cv2.VideoCapture(self.source, cv2.CAP_ANY)
-        self.video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self.video_capture.set(cv2.CAP_PROP_FPS, self.fps)
-        print(self.video_capture.get(cv2.CAP_PROP_FRAME_WIDTH), self.video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT),self.video_capture.get(cv2.CAP_PROP_FPS))
-        self.video_capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        while self.is_running:
-            ret, frame = self.video_capture.read()
-            if ret:
-                rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                if g.config["Setting"]["camera_width"]<640 or g.config["Setting"]["camera_height"]<480:
-                    rgb_image = cv2.resize(rgb_image, (g.config["Setting"]["camera_width"], g.config["Setting"]["camera_height"]))
-                if g.config["Setting"]["flip_x"]:
-                    rgb_image = cv2.flip(rgb_image, 1)
-                if g.config["Setting"]["flip_y"]:
-                    rgb_image = cv2.flip(rgb_image, 0)
 
-                self.tracker.process_frames(rgb_image)
-                if self.show_image:
-                    if g.config["Tracking"]["Head"]["enable"] or g.config["Tracking"]["Face"]["enable"]:
-                        rgb_image = draw_face_landmarks(rgb_image)
-                    if g.config["Tracking"]["Tongue"]["enable"]:
-                        rgb_image = draw_tongue_position(rgb_image)
-                    if g.config["Tracking"]["Hand"]["enable"]:
-                        rgb_image = draw_hand_landmarks(rgb_image)
-                    rgb_image = cv2.resize(rgb_image, (640, 480))
-                    h, w, ch = rgb_image.shape
-                    bytes_per_line = ch * w
-                    convert_to_Qt_format = QImage(
-                        rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888
-                    )
-                    self.frame_ready.emit(convert_to_Qt_format)
-        self.cleanup()
+def get_install_path():
+    config = load_config()
+    return config.get("InstallPath")
 
-    def stop(self):
-        self.is_running = False
-        self.tracker.stop()
 
-    def cleanup(self):
-        if self.video_capture:
-            self.video_capture.release()
-            cv2.destroyAllWindows()
+def get_python_path():
+    config = load_config()
+    return config.get("PythonPath")
 
-class VideoWindow(QMainWindow):
+
+def set_install_path(path):
+    config = load_config()
+    config["InstallPath"] = path
+    save_config(config)
+
+
+def set_python_path(path):
+    config = load_config()
+    config["PythonPath"] = path
+    save_config(config)
+
+
+def get_resource_path(relative_path: str) -> str:
+    return os.path.join(os.getcwd(), relative_path)
+
+
+# Modern QSS Stylesheet
+modern_qss = """
+QWidget {
+    background-color: #444444; /* Darker gray background */
+    color: #ffffff; /* White text for better contrast on dark background */
+}
+
+QDialog, QMessageBox, QProgressDialog {
+    background-color: #555555; /* Slightly lighter gray for dialogs */
+    border: 1px solid #666666;
+    border-radius: 8px;
+}
+
+QLabel {
+    background-color: transparent; /* Ensure labels have transparent background */
+}
+
+QLineEdit, QComboBox, QTreeView {
+    border: 1px solid #777777;
+    border-radius: 4px;
+    padding: 2px 4px;
+    background-color: #666666; /* Darker input fields */
+    color: #ffffff;
+}
+
+QTreeView::item:selected {
+    background-color: #777777; /* Selection color for tree view */
+}
+
+QPushButton {
+    background-color: #0078d4; /* Modern blue */
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 8px; /* Rounded corners */
+    font-size: 10pt;
+}
+
+QPushButton:hover {
+    background-color: #005a9e; /* Darker blue on hover */
+}
+
+QPushButton:pressed {
+    background-color: #003d6b; /* Even darker blue when pressed */
+}
+
+QPushButton:disabled {
+    background-color: #555555; /* Gray when disabled */
+    color: #888888;
+}
+
+QProgressBar {
+    border: 1px solid #777777;
+    border-radius: 5px;
+    background-color: #ffffff; /* White background */
+    text-align: center;
+    color: #000000; /* Black text for contrast on white background */
+}
+
+QProgressBar::chunk {
+    background-color: #0078d4; /* Blue progress chunk */
+    border-radius: 4px;
+    margin: 1px; /* Margin for the chunk */
+}
+
+QProgressDialog QLabel {
+    background-color: transparent;
+    color: #ffffff;
+}
+
+QMessageBox QLabel {
+    background-color: transparent;
+    color: #ffffff;
+}
+
+QMessageBox QPushButton {
+    min-width: 80px; /* Ensure message box buttons have minimum width */
+}
+
+QComboBox QAbstractItemView {
+    background-color: #555555;
+    color: #ffffff;
+    selection-background-color: #777777;
+}
+"""
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='EXVR Installer')
+    parser.add_argument('-log', action='store_true', help='Enable detailed logging to console')
+    return parser.parse_known_args()[0]
+
+
+def setup_logging(args):
+    if args.log:
+        import ctypes
+        ctypes.windll.kernel32.AllocConsole()
+        sys.stdout = open('CONOUT$', 'w')
+        sys.stderr = open('CONOUT$', 'w')
+
+    log_dir = get_resource_path("logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"installer_{time.strftime('%Y%m%d_%H%M%S')}.log")
+
+    if args.log:
+        class TeeOutput:
+            def __init__(self, file_stream, console_stream):
+                self.file_stream = file_stream
+                self.console_stream = console_stream
+
+            def write(self, message):
+                self.file_stream.write(message)
+                self.console_stream.write(message)
+                self.file_stream.flush()
+                self.console_stream.flush()
+
+            def flush(self):
+                self.file_stream.flush()
+                self.console_stream.flush()
+
+        log_file_stream = open(log_file, "w", encoding="utf-8")
+        original_stdout = sys.stdout
+        sys.stdout = TeeOutput(log_file_stream, original_stdout)
+        sys.stderr = sys.stdout
+    else:
+        sys.stdout = open(log_file, "w", encoding="utf-8")
+        sys.stderr = sys.stdout
+
+    print(f"Logging to: {log_file}")
+
+
+def log(message):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}")
+
+
+def create_tmp_folder():
+    try:
+        tmp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp")
+        if not os.path.exists(tmp_dir):
+            os.makedirs(tmp_dir)
+        return tmp_dir
+    except Exception as e:
+        tmp_dir = tempfile.gettempdir()
+        return tmp_dir
+
+
+def clean_tmp_folder(tmp_dir):
+    try:
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    except Exception as e:
+        log(f"Error cleaning temporary folder: {e}")
+
+
+def show_error_message(title, message):
+    log(f"ERROR: {title} - {message}")
+    msg_box = QMessageBox()
+    msg_box.setIcon(QMessageBox.Critical)
+    msg_box.setWindowTitle(title)
+    msg_box.setText(message)
+    msg_box.exec()
+
+
+def show_info_message(title, message):
+    log(f"INFO: {title} - {message}")
+    msg_box = QMessageBox()
+    msg_box.setIcon(QMessageBox.Information)
+    msg_box.setWindowTitle(title)
+    msg_box.setText(message)
+    msg_box.exec()
+
+
+def ask_question(title, question):
+    log(f"QUESTION: {title} - {question}")
+    msg_box = QMessageBox()
+    msg_box.setIcon(QMessageBox.Question)
+    msg_box.setWindowTitle(title)
+    msg_box.setText(question)
+    msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+    msg_box.setDefaultButton(QMessageBox.Yes)
+    return msg_box.exec()
+
+
+# 新增函数：复制文件并忽略指定文件夹
+def copy_with_ignore(src, dst, ignored_folders=None):
+    if ignored_folders is None:
+        ignored_folders = []
+
+    log(f"copy file : {src} to {dst}，ig: {ignored_folders}")
+
+    if not os.path.exists(dst):
+        os.makedirs(dst)
+
+    for item in os.listdir(src):
+        s = os.path.join(src, item)
+        d = os.path.join(dst, item)
+
+        if os.path.isdir(s):
+            if item in ignored_folders:
+                log(f"ig: {item}")
+                if not os.path.exists(d):
+                    os.makedirs(d)
+                continue
+
+            if os.path.exists(d):
+                copy_with_ignore(s, d, ignored_folders)
+            else:
+                shutil.copytree(s, d, dirs_exist_ok=True)
+        else:
+            shutil.copy2(s, d)
+
+
+def quote_path_if_needed(path):
+    if " " in path:
+        return f'"{path}"'
+    return path
+
+
+# 确保路径使用反斜杠
+def normalize_path(path):
+    return path.replace("/", "\\")
+
+
+def is_admin():
+    try:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except:
+        return False
+
+
+class CustomFileDialog(QDialog):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select installation path")
+        self.setMinimumSize(500, 400)
+        self.selected_path = ""
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        path_layout = QHBoxLayout()
+        path_label = QLabel("Installation path:")
+        self.path_edit = QLineEdit("C:\\")
+        self.path_edit.textChanged.connect(self.validate_path)
+
+        self.drive_combo = QComboBox()
+        self.populate_drives()
+        self.drive_combo.currentIndexChanged.connect(self.drive_changed)
+
+        path_layout.addWidget(path_label)
+        path_layout.addWidget(self.drive_combo)
+        path_layout.addWidget(self.path_edit, 1)
+
+        self.model = QFileSystemModel()
+        self.model.setFilter(QDir.AllDirs | QDir.NoDotAndDotDot)
+        self.model.setRootPath("C:\\")
+
+        self.tree = QTreeView()
+        self.tree.setModel(self.model)
+        self.tree.setRootIndex(self.model.index("C:\\"))
+        self.tree.setColumnWidth(0, 250)
+        self.tree.clicked.connect(self.tree_item_clicked)
+
+        for i in range(1, self.model.columnCount()):
+            self.tree.hideColumn(i)
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: red;")
+
+        button_layout = QHBoxLayout()
+        self.ok_button = QPushButton("Choose")
+        self.ok_button.clicked.connect(self.accept)
+        self.ok_button.setEnabled(False)
+
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+
+        button_layout.addWidget(self.status_label, 1)
+        button_layout.addWidget(self.ok_button)
+        button_layout.addWidget(cancel_button)
+
+        layout.addLayout(path_layout)
+        layout.addWidget(self.tree)
+        layout.addLayout(button_layout)
+
+        self.validate_path()
+
+    def populate_drives(self):
+        available_drives = []
+        for drive_letter in range(ord('A'), ord('Z') + 1):
+            drive = chr(drive_letter) + ":\\"
+            if os.path.exists(drive):
+                available_drives.append(drive)
+
+        self.drive_combo.addItems(available_drives)
+        index = self.drive_combo.findText("C:\\")
+        if index >= 0:
+            self.drive_combo.setCurrentIndex(index)
+
+    def drive_changed(self, index):
+        drive = self.drive_combo.currentText()
+        self.model.setRootPath(drive)
+        self.tree.setRootIndex(self.model.index(drive))
+        self.path_edit.setText(drive)
+
+    def tree_item_clicked(self, index):
+        path = self.model.filePath(index)
+        self.path_edit.setText(path)
+
+    def validate_path(self):
+        path = self.path_edit.text()
+
+        # Check if path exists
+        if not os.path.exists(path):
+            self.status_label.setText("Path does not exist")
+            self.ok_button.setEnabled(False)
+            return
+
+        if re.search("[\u4e00-\u9fff]", path):
+            self.status_label.setText("路径不能包含中文字符")
+            self.ok_button.setEnabled(False)
+            return
+
+        # Check if path is writable
+        if not os.access(os.path.dirname(path), os.W_OK):
+            self.status_label.setText("No write permission")
+            self.ok_button.setEnabled(False)
+            return
+
+        # Path is valid
+        self.status_label.setText("")
+        self.ok_button.setEnabled(True)
+        self.selected_path = path
+
+    def get_selected_path(self):
+        return self.selected_path
+
+
+# --- Worker Threads ---
+class WorkerSignals(QObject):
+    progress = Signal(int)
+    finished = Signal()
+    error = Signal(str)
+    result = Signal(str)
+    log = Signal(str)
+
+
+class PythonCheckWorker(QThread):
     def __init__(self):
         super().__init__()
-        screen = QApplication.screens()[0]
-        screen_size = screen.size()
-        self.width = int(screen_size.width() * 0.3)
-        self.height = int(screen_size.height() * 0.65)
-        self.half_height = int(self.height / 2)
+        self.signals = WorkerSignals()
+        self._is_running = True
 
-        # self.setAttribute(Qt.WA_TranslucentBackground)
-        # self.setAttribute(Qt.WA_NoSystemBackground, False)
-        # self.setAttribute(Qt.WA_PaintOnScreen)
-        version=g.config["Version"]
-        self.setWindowTitle(
-            f"ExVR {version} - Experience Virtual Reality"
-        )
-        # self.setFixedSize(width, height)
-        self.resize(self.width, self.height)
+    def stop(self):
+        self._is_running = False
+        self.wait()
 
-        central_widget = QWidget(self)
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
-        self.image_label = QLabel(self)
-        layout.addWidget(self.image_label)
-        self.setMinimumSize(600, 800)
-        self.image_label.setSizePolicy(
-            QSizePolicy.Expanding,
-            QSizePolicy.Expanding
-        )
-
-        top_right_layout = QHBoxLayout()
-        top_right_layout.addStretch()
-        self.steamvr_status_label = QLabel(self)
-        top_right_layout.addWidget(self.steamvr_status_label)
-        layout.insertLayout(0, top_right_layout)
-
-
-        flip_layout = QHBoxLayout()  # Create a QHBoxLayout for new reset buttons
-        self.flip_x_checkbox = QCheckBox("Flip X", self)
-        self.flip_x_checkbox.clicked.connect(self.flip_x)
-        self.flip_x_checkbox.setChecked(g.config["Setting"]["flip_x"])
-        flip_layout.addWidget(self.flip_x_checkbox)
-
-        self.flip_y_checkbox = QCheckBox("Flip Y", self)
-        self.flip_y_checkbox.clicked.connect(self.flip_y)
-        self.flip_y_checkbox.setChecked(g.config["Setting"]["flip_y"])
-        flip_layout.addWidget(self.flip_y_checkbox)
-        layout.addLayout(flip_layout)
-
-        self.ip_camera_url_input = QLineEdit(self)
-        self.ip_camera_url_input.setPlaceholderText("Enter IP camera URL")
-        self.ip_camera_url_input.textChanged.connect(self.update_camera_ip)
-        # use .get() to avoid KeyError with old config
-        self.ip_camera_url_input.setText(g.config["Setting"].get("camera_ip", ""))
-        layout.addWidget(self.ip_camera_url_input)
-
-        camera_layout = QHBoxLayout()
-        self.camera_selection = QComboBox(self)
-        self.populate_camera_list()
-        camera_layout.addWidget(self.camera_selection)
-        self.camera_resolution_selection = QComboBox(self)
-        self.populate_resolution_list()
-        self.camera_resolution_selection.currentIndexChanged.connect(self.update_camera_resolution)
-        camera_layout.addWidget(self.camera_resolution_selection)
-        self.camera_fps_selection = QComboBox(self)
-        self.populate_fps_list()
-        self.camera_fps_selection.currentIndexChanged.connect(self.update_camera_fps)
-        camera_layout.addWidget(self.camera_fps_selection)
-        layout.addLayout(camera_layout)
-
-        self.priority_selection = QComboBox(self)
-        self.priority_selection.addItems(["IDLE_PRIORITY_CLASS", "BELOW_NORMAL_PRIORITY_CLASS", "NORMAL_PRIORITY_CLASS", "ABOVE_NORMAL_PRIORITY_CLASS", "HIGH_PRIORITY_CLASS", "REALTIME_PRIORITY_CLASS"])
-        self.priority_selection.currentIndexChanged.connect(self.set_process_priority)
-        layout.addWidget(self.priority_selection)
-        self.priority_selection.setCurrentIndex(self.priority_selection.findText(g.config["Setting"]["priority"]))
-
-        self.install_state, steamvr_driver_path, vrcfacetracking_path, check_steamvr_path = self.install_checking()
-        if check_steamvr_path is not None:
-            self.steamvr_status_label.setText("SteamVR Installed")
-            self.steamvr_status_label.setStyleSheet("color: green; font-weight: bold;")
-        else:
-            self.steamvr_status_label.setText("SteamVR Not Installed")
-            self.steamvr_status_label.setStyleSheet("color: red; font-weight: bold;")
-        if self.install_state:
-            self.install_button = QPushButton("Uninstall Drivers", self)
-            self.install_button.setStyleSheet("")
-        else:
-            self.install_button = QPushButton("Install Drivers", self)
-            self.install_button.setStyleSheet(
-                "QPushButton { background-color: blue; color: white; }"
+    def _check_command(self, command):
+        try:
+            self.signals.log.emit(f"Executing: {' '.join(command)}")
+            result = subprocess.run(
+                command, capture_output=True, text=True,
+                timeout=PYTHON_CHECK_TIMEOUT, check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
-        self.install_button.clicked.connect(self.install_function)
-        layout.addWidget(self.install_button)
+            if result.returncode == 0 and f"Python {PYTHON_VERSION}" in result.stdout:
+                self.signals.log.emit(f"Success: {result.stdout.strip()}")
+                return True
+            else:
+                self.signals.log.emit(f"Failed or wrong version: {result.stdout.strip()} {result.stderr.strip()}")
+                return False
+        except Exception as e:
+            self.signals.log.emit(f"Command error: {' '.join(command)} - {e}")
+            return False
 
-        self.toggle_button = QPushButton("Start Tracking", self)
-        self.toggle_button.setStyleSheet(
-            "QPushButton { background-color: green; color: white; }"
-        )
-        self.toggle_button.clicked.connect(self.toggle_camera)
-        layout.addWidget(self.toggle_button)
+    def _check_registry(self):
+        # 检查ExVR注册表中是否有Python路径
+        try:
+            python_path = get_python_path()
+            if python_path and os.path.exists(python_path) and python_path.endswith("python.exe"):
+                if self._check_command([python_path, "--version"]):
+                    self.signals.log.emit(f"Found valid Python in JSON config: {python_path}")
+                    return True
+        except Exception as e:
+            self.signals.log.emit(f"JSON config check error: {e}")
 
-        self.show_frame_button = QPushButton("Show Frame", self)
-        self.show_frame_button.clicked.connect(self.toggle_video_display)
-        layout.addWidget(self.show_frame_button)
+        return False
 
-        only_ingame_layout = QHBoxLayout()
-        self.only_ingame_checkbox = QCheckBox("Only Ingame", self)
-        self.only_ingame_checkbox.clicked.connect(lambda: self.toggle_only_in_game(self.only_ingame_checkbox.isChecked()))
-        self.only_ingame_checkbox.setChecked(g.config["Setting"]["only_ingame"])
-        self.only_ingame_checkbox.setToolTip("Currently this only applies to hotkeys and mouse input and not head movement")
-        self.only_ingame_game_input = QLineEdit(self)
-        self.only_ingame_game_input.setPlaceholderText("window title / process name / VRChat, VRChat.exe, javaw.exe")
-        self.only_ingame_game_input.textChanged.connect(self.update_mouse_only_in_game_name)
-        self.only_ingame_game_input.setText(g.config["Setting"]["only_ingame_game"])
-        only_ingame_layout.addWidget(self.only_ingame_checkbox)
-        only_ingame_layout.addWidget(self.only_ingame_game_input)
-        layout.addLayout(only_ingame_layout)
+    def run(self):
+        try:
+            self.signals.log.emit("Starting Python check...")
+            python_installed = False
 
-        separator_0 = QFrame(self)
-        separator_0.setFrameShape(
-            QFrame.HLine
-        )  # Set the frame to be a horizontal line
-        separator_0.setFrameShadow(QFrame.Sunken)  # Give it a sunken shadow effect
-        layout.addWidget(separator_0)
+            if self._check_registry():
+                python_installed = True
 
-        reset_layout = QHBoxLayout()  # Create a QHBoxLayout for new reset buttons
-        self.reset_head = QPushButton("Reset Head", self)
-        self.reset_head.clicked.connect(reset_head)
-        reset_layout.addWidget(self.reset_head)
-        self.reset_eyes = QPushButton("Reset Eyes", self)
-        self.reset_eyes.clicked.connect(reset_eye)
-        reset_layout.addWidget(self.reset_eyes)
-        self.reset_l_hand = QPushButton("Reset LHand", self)
-        self.reset_l_hand.clicked.connect(lambda: reset_hand(True))
-        reset_layout.addWidget(self.reset_l_hand)
-        self.reset_r_hand = QPushButton("Reset RHand", self)
-        self.reset_r_hand.clicked.connect(lambda: reset_hand(False))
-        reset_layout.addWidget(self.reset_r_hand)
-        layout.addLayout(reset_layout)
+            if not self._is_running:
+                return
 
-        checkbox_layout = QHBoxLayout()
-        self.checkbox1 = QCheckBox("Head", self)
-        self.checkbox1.clicked.connect(
-            lambda: self.set_tracking_config("Head", self.checkbox1.isChecked())
-        )
-        checkbox_layout.addWidget(self.checkbox1)
-        self.checkbox2 = QCheckBox("Face", self)
-        self.checkbox2.clicked.connect(
-            lambda: self.set_tracking_config("Face", self.checkbox2.isChecked())
-        )
-        checkbox_layout.addWidget(self.checkbox2)
-        self.checkbox3 = QCheckBox("Tongue", self)
-        self.checkbox3.clicked.connect(
-            lambda: self.set_tracking_config("Tongue", self.checkbox3.isChecked())
-        )
-        checkbox_layout.addWidget(self.checkbox3)
-        self.checkbox4 = QCheckBox("Hand", self)
-        self.checkbox4.clicked.connect(
-            lambda: self.set_tracking_config("Hand", self.checkbox4.isChecked())
-        )
-        checkbox_layout.addWidget(self.checkbox4)
-        layout.addLayout(checkbox_layout)
-
-        checkbox_layout_1 = QHBoxLayout()
-        self.checkbox5 = QCheckBox("Hand Down", self)
-        self.checkbox5.clicked.connect(
-            lambda: self.toggle_hand_down(self.checkbox5.isChecked())
-        )
-        checkbox_layout_1.addWidget(self.checkbox5)
-        self.checkbox6 = QCheckBox("Finger Action", self)
-        self.checkbox6.clicked.connect(
-            lambda: self.toggle_finger_action(self.checkbox6.isChecked())
-        )
-        checkbox_layout_1.addWidget(self.checkbox6)
-        layout.addLayout(checkbox_layout_1)
-
-        slider_layout = QHBoxLayout()
-        self.slider1 = QSlider(Qt.Horizontal)
-        self.slider2 = QSlider(Qt.Horizontal)
-        self.slider3 = QSlider(Qt.Horizontal)
-        self.slider1.setRange(1, 200)
-        self.slider2.setRange(1, 200)
-        self.slider3.setRange(1, 100)
-        self.slider1.setSingleStep(1)
-        self.slider2.setSingleStep(1)
-        self.slider3.setSingleStep(1)
-        self.label1 = QLabel(f"x {g.config['Tracking']['Hand']['x_scalar']:.2f}")
-        self.label2 = QLabel(f"y {g.config['Tracking']['Hand']['y_scalar']:.2f}")
-        self.label3 = QLabel(f"z {g.config['Tracking']['Hand']['z_scalar']:.2f}")
-        self.slider1.valueChanged.connect(lambda value: self.set_scalar(value, "x"))
-        self.slider2.valueChanged.connect(lambda value: self.set_scalar(value, "y"))
-        self.slider3.valueChanged.connect(lambda value: self.set_scalar(value, "z"))
-        slider_layout.addWidget(self.label1)
-        slider_layout.addWidget(self.slider1)
-        slider_layout.addWidget(self.label2)
-        slider_layout.addWidget(self.slider2)
-        slider_layout.addWidget(self.label3)
-        slider_layout.addWidget(self.slider3)
-        layout.addLayout(slider_layout)
-
-        separator_1 = QFrame(self)
-        separator_1.setFrameShape(
-            QFrame.HLine
-        )  # Set the frame to be a horizontal line
-        separator_1.setFrameShadow(QFrame.Sunken)  # Give it a sunken shadow effect
-        layout.addWidget(separator_1)
-
-        # label_layout = QHBoxLayout()
-        # self.left_label = self.create_label("Left Controller", "red")
-        # self.right_label = self.create_label("Right Controller", "red")
-        # label_layout.addWidget(self.left_label)
-        # label_layout.addWidget(self.right_label)
-        # layout.addLayout(label_layout)
-
-        controller_checkbox_layout = QHBoxLayout()
-        self.controller_checkbox1 = QCheckBox("Left Controller", self)
-        self.controller_checkbox1.clicked.connect(
-            lambda: self.set_tracking_config("LeftController", self.controller_checkbox1.isChecked())
-        )
-        self.controller_checkbox2 = QCheckBox("Right Controller", self)
-        self.controller_checkbox2.clicked.connect(
-            lambda: self.set_tracking_config("RightController", self.controller_checkbox2.isChecked())
-        )
-        controller_checkbox_layout.addWidget(self.controller_checkbox1)
-        controller_checkbox_layout.addWidget(self.controller_checkbox2)
-        layout.addLayout(controller_checkbox_layout)
-
-        controller_slider_layout = QHBoxLayout()
-        self.controller_slider_x = QSlider(Qt.Horizontal)
-        self.controller_slider_y = QSlider(Qt.Horizontal)
-        self.controller_slider_z = QSlider(Qt.Horizontal)
-        self.controller_slider_l = QSlider(Qt.Horizontal)
-        self.controller_slider_x.setRange(-50, 50)
-        self.controller_slider_y.setRange(-50, 50)
-        self.controller_slider_z.setRange(-50, 50)
-        self.controller_slider_l.setRange(0, 100)
-        self.controller_slider_x.setSingleStep(1)
-        self.controller_slider_y.setSingleStep(1)
-        self.controller_slider_z.setSingleStep(1)
-        self.controller_slider_l.setSingleStep(1)
-        self.controller_label_x = QLabel(f"x {g.config['Tracking']['LeftController']['base_x']:.2f}")
-        self.controller_label_y = QLabel(f"y {g.config['Tracking']['LeftController']['base_y']:.2f}")
-        self.controller_label_z = QLabel(f"z {g.config['Tracking']['LeftController']['base_z']:.2f}")
-        self.controller_label_l = QLabel(f"l {g.config['Tracking']['LeftController']['length']:.2f}")
-        self.controller_slider_x.valueChanged.connect(lambda value: self.set_scalar(value, "controller_x"))
-        self.controller_slider_y.valueChanged.connect(lambda value: self.set_scalar(value, "controller_y"))
-        self.controller_slider_z.valueChanged.connect(lambda value: self.set_scalar(value, "controller_z"))
-        self.controller_slider_l.valueChanged.connect(lambda value: self.set_scalar(value, "controller_l"))
-        controller_slider_layout.addWidget(self.controller_label_x)
-        controller_slider_layout.addWidget(self.controller_slider_x)
-        controller_slider_layout.addWidget(self.controller_label_y)
-        controller_slider_layout.addWidget(self.controller_slider_y)
-        controller_slider_layout.addWidget(self.controller_label_z)
-        controller_slider_layout.addWidget(self.controller_slider_z)
-        controller_slider_layout.addWidget(self.controller_label_l)
-        controller_slider_layout.addWidget(self.controller_slider_l)
-        layout.addLayout(controller_slider_layout)
+            result_status = "installed" if python_installed else "not_installed"
+            self.signals.log.emit(f"Python check result: {result_status}")
+            self.signals.result.emit(result_status)
+            self.signals.finished.emit()
+        except Exception as e:
+            self.signals.log.emit(f"Python check failed: {e}")
+            self.signals.error.emit(str(e))
 
 
-        separator_2 = QFrame(self)
-        separator_2.setFrameShape(
-            QFrame.HLine
-        )  # Set the frame to be a horizontal line
-        separator_2.setFrameShadow(QFrame.Sunken)  # Give it a sunken shadow effect
-        layout.addWidget(separator_2)
-        mouse_layout = QHBoxLayout()
-        self.mouse_checkbox = QCheckBox("Mouse", self)
-        self.mouse_checkbox.clicked.connect(lambda: self.toggle_mouse(self.mouse_checkbox.isChecked()))
-        self.mouse_checkbox.setChecked(g.config["Mouse"]["enable"])
+class DownloadWorker(QThread):
+    def __init__(self, url, save_path):
+        super().__init__()
+        self.url = url
+        self.save_path = save_path
+        self.signals = WorkerSignals()
+        self._is_running = True
 
-        self.mouse_slider_x = QSlider(Qt.Horizontal)
-        self.mouse_slider_y = QSlider(Qt.Horizontal)
-        self.mouse_slider_dx = QSlider(Qt.Horizontal)
-        self.mouse_slider_x.setRange(0, 360)
-        self.mouse_slider_y.setRange(0, 360)
-        self.mouse_slider_dx.setRange(0, 20)
-        self.mouse_slider_x.setSingleStep(1)
-        self.mouse_slider_y.setSingleStep(1)
-        self.mouse_slider_dx.setSingleStep(1)
-        self.mouse_label_x = QLabel(f"x {int(g.config['Mouse']['scalar_x']*100)}")
-        self.mouse_label_y = QLabel(f"y {int(g.config['Mouse']['scalar_y']*100)}")
-        self.mouse_label_dx = QLabel(f"dx {g.config['Mouse']['dx']:.2f}")
-        self.mouse_slider_x.valueChanged.connect(lambda value: self.set_scalar(value, "mouse_x"))
-        self.mouse_slider_y.valueChanged.connect(lambda value: self.set_scalar(value, "mouse_y"))
-        self.mouse_slider_dx.valueChanged.connect(lambda value: self.set_scalar(value, "mouse_dx"))
-        mouse_layout.addWidget(self.mouse_checkbox)
-        mouse_layout.addWidget(self.mouse_label_x)
-        mouse_layout.addWidget(self.mouse_slider_x)
-        mouse_layout.addWidget(self.mouse_label_y)
-        mouse_layout.addWidget(self.mouse_slider_y)
-        mouse_layout.addWidget(self.mouse_label_dx)
-        mouse_layout.addWidget(self.mouse_slider_dx)
-        layout.addLayout(mouse_layout)
+    def stop(self):
+        self._is_running = False
+        self.wait()
 
-        separator_3 = QFrame(self)
-        separator_3.setFrameShape(
-            QFrame.HLine
-        )  # Set the frame to be a horizontal line
-        separator_3.setFrameShadow(QFrame.Sunken)  # Give it a sunken shadow effect
-        layout.addWidget(separator_3)
+    def run(self):
+        try:
+            self.signals.log.emit(f"Starting download: {self.url} to {self.save_path}")
+            response = requests.get(self.url, stream=True, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            total_size = int(response.headers.get("content-length", 0))
+            downloaded = 0
+            os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
+            with open(self.save_path, "wb") as file:
+                for data in response.iter_content(chunk_size=8192):
+                    if not self._is_running:
+                        self.signals.log.emit("Download cancelled.")
+                        return
+                    file.write(data)
+                    downloaded += len(data)
+                    if total_size > 0:
+                        progress = int((downloaded / total_size) * 100)
+                        self.signals.progress.emit(progress)
+            self.signals.log.emit("Download finished.")
+            self.signals.result.emit(self.save_path)
+            self.signals.finished.emit()
 
-        config_layout = QHBoxLayout()
-        self.reset_hotkey_button = QPushButton("Reset Hotkey", self)
-        self.reset_hotkey_button.clicked.connect(self.reset_hotkeys)
-        config_layout.addWidget(self.reset_hotkey_button)
-        self.stop_hotkey_button = QPushButton("Stop Hotkey", self)
-        self.stop_hotkey_button.clicked.connect(stop_hotkeys)
-        config_layout.addWidget(self.stop_hotkey_button)
-        self.set_face_button = QPushButton("Set Face", self)
-        self.set_face_button.clicked.connect(self.face_dialog)
-        config_layout.addWidget(self.set_face_button)
-        self.update_config_button = QPushButton("Update Config", self)
-        self.update_config_button.clicked.connect(lambda:(g.update_configs(),self.update_checkboxes(), self.update_sliders()))
-        config_layout.addWidget(self.update_config_button)
-        self.save_config_button = QPushButton("Save Config", self)
-        self.save_config_button.clicked.connect(g.save_configs)
-        config_layout.addWidget(self.save_config_button)
-        layout.addLayout(config_layout)
+        except Exception as e:
+            self.signals.log.emit(f"Download error: {e}")
+            self.signals.error.emit(str(e))
 
-        self.update_checkboxes()
-        self.update_sliders()
 
-        self.video_thread = None
-        self.controller_thread = None
+class ExtractWorker(QThread):
+    def __init__(self, zip_path, extract_path, final_path=None, ignored_folders=None):
+        super().__init__()
+        self.zip_path = zip_path
+        self.extract_path = extract_path  # 临时解压目录
+        self.final_path = final_path  # 最终目标目录
+        self.ignored_folders = ignored_folders if ignored_folders else IGNORED_FOLDERS
+        self.signals = WorkerSignals()
+        self._is_running = True
 
-    def save_data(self):
-        data=deepcopy(g.default_data)
-        for i, (key, edits) in enumerate(self.lineEdits.items()):
-            idx=i+1
-            v = float(edits[0].text())
-            s = float(edits[1].text())
-            w = float(edits[2].text())
-            max_value = float(edits[3].text())
-            e = self.checkBoxes[key].isChecked()
-            data["BlendShapes"][idx]["v"] = v
-            data["BlendShapes"][idx]["s"] = s
-            data["BlendShapes"][idx]["w"] = w
-            data["BlendShapes"][idx]["max"] = max_value
-            data["BlendShapes"][idx]["e"] = e
-        save_data(data)
-        self.dialog.close()
+    def stop(self):
+        self._is_running = False
+        self.wait()
 
-    def face_dialog(self):
-        self.dialog = QDialog(self)
-        self.dialog.setWindowTitle("Face Setting")
-        self.dialog.resize(self.width, self.height)  # Set a fixed size for the dialog
+    def run(self):
+        try:
+            self.signals.log.emit(f"Ready to decompress: {self.zip_path} to {self.extract_path}")
+            os.makedirs(self.extract_path, exist_ok=True)
 
-        layout = QVBoxLayout(self.dialog)
+            # 解压到临时目录
+            with zipfile.ZipFile(self.zip_path, "r") as zip_ref:
+                total_files = len(zip_ref.namelist())
+                for i, file_info in enumerate(zip_ref.infolist()):
+                    if not self._is_running:
+                        self.signals.log.emit("Decompression cancelled.")
+                        return
+                    zip_ref.extract(file_info, self.extract_path)
+                    progress = int(((i + 1) / total_files) * 50)
+                    self.signals.progress.emit(progress)
 
-        # Create a scroll area
+            if self.final_path:
+                self.signals.log.emit(
+                    f"Currently copying the file from the temporary directory to the final destination: {self.final_path}")
+
+                extracted_items = os.listdir(self.extract_path)
+                if len(extracted_items) == 1 and os.path.isdir(os.path.join(self.extract_path, extracted_items[0])):
+                    source_dir = os.path.join(self.extract_path, extracted_items[0])
+                else:
+                    source_dir = self.extract_path
+
+                copy_with_ignore(source_dir, self.final_path, self.ignored_folders)
+                self.signals.progress.emit(100)
+            else:
+                self.signals.progress.emit(100)
+
+            self.signals.log.emit("Decompression and copying are complete.")
+            self.signals.finished.emit()
+        except Exception as e:
+            self.signals.log.emit(f"Decompression or copying error: {e}")
+            self.signals.error.emit(str(e))
+
+
+def replace_modules_with_json(install_path):
+    """根据映射规则替换模块文件"""
+    log("Replacing modules")
+    try:
+        # 获取虚拟环境路径
+        venv_path = os.path.join(install_path, "venv")
+        python_module_path = os.path.join(venv_path, "Lib", "site-packages")
+
+        # 源文件路径 (EXVR安装目录中的modules文件夹)
+        modules_path = install_path
+
+        # 遍历映射关系
+        for nu_file, file_path in LAU_MAPPING.items():
+            nu_file_path = os.path.join(modules_path, nu_file)
+
+            file_path = os.path.join(python_module_path, file_path)
+
+            if os.path.exists(nu_file_path):
+                log(f"Found module file: {nu_file_path}")
+                log(file_path)
+                try:
+                    shutil.copy2(nu_file_path, file_path)
+                    log(f"Successfully replaced: {nu_file_path}")
+                except Exception as e:
+                    log(f"Replacement failed: {e}")
+            else:
+                log(f"Module file not found: {nu_file_path}")
+    except Exception as e:
+        log(f"替换模块文件时出错: {e}")
+
+
+class InstallWorker(QThread):
+    def __init__(self, install_path, requirements_path):
+        super().__init__()
+        self.install_path = install_path
+        self.requirements_path = requirements_path
+        self.signals = WorkerSignals()
+        self._is_running = True
+        self.process = None
+
+    def stop(self):
+        self._is_running = False
+        if self.process:
+            try:
+                self.process.terminate()
+            except:
+                pass
+        self.wait()
+
+    def run(self):
+        try:
+            self.signals.log.emit(f"Creating virtual environment at {self.install_path}...")
+            venv_path = os.path.join(self.install_path, "venv")
+            if not os.path.exists(venv_path):
+                self.signals.log.emit("Creating new virtual environment...")
+
+                # 使用ExVR注册表中的Python解释器
+                python_path = self._get_python_from_registry()
+                if not python_path:
+                    delete_config()
+                    raise Exception("Python interpreter not found in ExVR registry")
+
+
+                self.process = subprocess.Popen(
+                    [python_path, "-m", "venv", venv_path],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                self.process.wait()
+                if self.process.returncode != 0:
+                    raise Exception("Failed to create virtual environment")
+            else:
+                self.signals.log.emit("Virtual environment already exists.")
+
+            self.signals.progress.emit(20)
+            if not self._is_running: return
+
+            pip_path = os.path.join(venv_path, "Scripts", "pip.exe")
+            if not os.path.exists(pip_path): raise FileNotFoundError(f"pip not found: {pip_path}")
+            if not os.path.exists(self.requirements_path): raise FileNotFoundError(
+                f"requirements.txt not found: {self.requirements_path}")
+
+            self.signals.log.emit(f"Installing requirements from {self.requirements_path} using Tsinghua mirror...")
+            self.process = subprocess.Popen(
+                [pip_path, "install", "-i", "https://pypi.tuna.tsinghua.edu.cn/simple", "-r", self.requirements_path],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+
+            progress = 0
+            while self._is_running:
+                line = self.process.stdout.readline()
+                if not line and self.process.poll() is not None:
+                    break
+                if line:
+                    self.signals.log.emit(line.strip())
+                    # Increment progress based on output
+                    if "Collecting" in line:
+                        progress = min(progress + 2, 90)
+                        self.signals.progress.emit(progress)
+                    elif "Installing" in line:
+                        progress = min(progress + 1, 95)
+                        self.signals.progress.emit(progress)
+
+            if not self._is_running: return
+
+            if self.process.returncode == 0:
+                self.signals.log.emit("Requirements installation completed successfully.")
+                self.signals.log.emit("Extraction completed, starting module file replacement")
+                replace_modules_with_json(self.install_path)
+                self.signals.progress.emit(100)
+                self.signals.finished.emit()
+            else:
+                error_msg = f"Requirements installation failed with return code {self.process.returncode}"
+                self.signals.log.emit(error_msg)
+                self.signals.error.emit(error_msg)
+
+
+        except Exception as e:
+            self.signals.log.emit(f"Installation error: {e}")
+            self.signals.error.emit(str(e))
+
+    def _get_python_from_registry(self):
+        try:
+            python_path = get_python_path()
+            if python_path and os.path.exists(python_path):
+                return python_path
+        except Exception as e:
+            self.signals.log.emit(f"Error getting Python path from config: {e}")
+        return None
+
+
+class SilentInstaller:
+    def __init__(self, app, args):
+        self.args = args
+        self.app = app
+        self.tmp_dir = create_tmp_folder()
+        self.install_path = None
+        self.python_installer_path = None
+        self.release_zip_path = None
+        self.progress_dialog = None
+        self.current_worker = None
+        self.user_cancelled = False
+        self.show_announcement = True
+        self.python_path = None
+
+    def run(self):
+        log("Starting silent installer...")
+        try:
+            if self._check_lau_update():
+                log("laut update")
+            self.install_path = get_install_path()
+            self.python_path = get_python_path()
+            if self.install_path and self.python_path:
+                log(f"Found existing installation at: {self.install_path}")
+                log(f"Found existing Python at: {self.python_path}")
+                self._check_for_updates()
+                return
+            else:
+                log("No existing installation found in config.")
+        except Exception as e:
+            log(f"Error reading config: {e}")
+
+        dialog = CustomFileDialog()
+        if dialog.exec() == QDialog.Accepted:
+            self.install_path = dialog.get_selected_path()
+            # 确保路径使用反斜杠
+            self.install_path = normalize_path(self.install_path)
+            log(f"Selected installation path: {self.install_path}")
+
+            self._check_python()
+        else:
+            log("Installation cancelled by user.")
+            self._quit_installer()
+
+    def _stop_current_worker(self):
+        """
+        停掉并等待当前线程，防止"QThread: Destroyed while thread is still running"
+        """
+        if self.current_worker and self.current_worker.isRunning():
+            log(f"正在停止线程: {type(self.current_worker).__name__}")
+            try:
+                # 尝试使用stop方法
+                self.current_worker.stop()
+            except AttributeError:
+                # 如果没有stop方法，使用quit+wait
+                log("线程没有stop方法，使用quit+wait")
+                self.current_worker.quit()
+                # 设置超时，避免无限等待
+                if not self.current_worker.wait(3000):  # 等待最多3秒
+                    log("线程未能在3秒内停止，强制终止")
+                    self.current_worker.terminate()
+                    self.current_worker.wait()
+        self.current_worker = None
+
+    def _start_worker(self, worker: QThread):
+        self._stop_current_worker()
+        self.current_worker = worker
+        worker.start()
+
+    def _check_python(self):
+        log("Checking for Python installation...")
+        self._show_progress_dialog("Check", "Check Python")
+        worker = PythonCheckWorker()
+        worker.signals.log.connect(log)
+        worker.signals.result.connect(self._handle_python_check_result)
+        worker.signals.error.connect(self._handle_error)
+        self._start_worker(worker)
+
+    def _handle_python_check_result(self, result):
+        self._close_progress_dialog()
+        if result == "installed":
+            log("Python 3.11 is installed. Proceeding with download.")
+            self._download_release()
+        else:
+            log("Python 3.11 not found. Automatically downloading and installing...")
+            self._download_python()
+
+    def _download_python(self):
+        log(f"Downloading Python from {PYTHON_DOWNLOAD_URL}")
+        self.python_installer_path = os.path.join(self.tmp_dir, "python_installer.exe")
+        self._show_progress_dialog("Download Python", "Download Python 3.11...")
+        worker = DownloadWorker(PYTHON_DOWNLOAD_URL, self.python_installer_path)
+        worker.signals.log.connect(log)
+        worker.signals.progress.connect(self._update_progress)
+        worker.signals.error.connect(self._handle_error)
+        worker.signals.finished.connect(self._install_python)
+        self._start_worker(worker)
+
+    def _install_python(self):
+        self._close_progress_dialog()
+        log("Installing Python...")
+
+        python_install_dir = os.path.join(self.install_path, "python")
+        python_install_dir = normalize_path(python_install_dir)
+        os.makedirs(python_install_dir, exist_ok=True)
+        log(f"Created Python installation directory: {python_install_dir}")
+
+        try:
+            log("Have admin rights, installing directly...")
+
+            installer_path = normalize_path(self.python_installer_path)
+            target_dir = quote_path_if_needed(python_install_dir)
+
+            cmd_args = [
+                installer_path,
+                "/passive",
+                "InstallAllUsers=0",
+                "PrependPath=0",
+                "Include_doc=0",
+                "Include_launcher=0",
+                "Include_test=0",
+                "Include_dev=0",
+                "AssociateFiles=0",
+                "Shortcuts=0",
+                f"TargetDir={target_dir}"
+            ]
+
+            log(f"Running Python installer with args: {' '.join(cmd_args)}")
+
+            process = subprocess.Popen(
+                cmd_args,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            event_loop = QEventLoop()
+
+            timer = QTimer()
+            timer.setInterval(100)
+
+            def check_process():
+                if process.poll() is not None:
+                    timer.stop()
+                    event_loop.quit()
+
+            timer.timeout.connect(check_process)
+            timer.start()
+
+            event_loop.exec()
+
+            if process.returncode != 0:
+                stderr = process.stderr.read().decode('utf-8', errors='ignore')
+                raise Exception(f"Python installation failed with code {process.returncode}: {stderr}")
+
+            python_exe_path = os.path.join(python_install_dir, "python.exe")
+            if not os.path.exists(python_exe_path):
+                raise Exception(f"Python executable not found at {python_exe_path}")
+
+            self._store_python_path_in_registry(python_exe_path)
+            self.python_path = python_exe_path
+
+            log("Python installation completed successfully.")
+            self._download_release()
+
+        except Exception as e:
+            self._handle_error(f"Failed to install Python: {e}")
+
+
+    def _check_lau_update(self):
+        log("check lau version...")
+        try:
+            remote_lau_version = server_data.get("lau_version")
+            remote_lau_board = server_data.get("lau_board")
+
+            if remote_lau_version is not None and remote_lau_version > LAU_VERSION:
+                log(f"Launcher have update ({remote_lau_version})")
+                self._show_lau_board(remote_lau_board)
+                return True
+
+            log("not lau version")
+            return False
+        except Exception as e:
+            log(f"lau check update error: {e}")
+            return False
+
+    def _show_lau_board(self, content):
+        log("Show lau board")
+        dialog = QDialog()
+        dialog.setWindowTitle("Launcher Needs Update")
+        dialog.setMinimumSize(600, 400)
+
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #555555;
+                color: #ffffff;
+                border-radius: 8px;
+            }
+            QLabel {
+                background-color: transparent;
+                color: #ffffff;
+                font-size: 12pt;
+                padding: 10px;
+            }
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QPushButton {
+                min-width: 100px;
+                font-size: 10pt;
+            }
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(10)
+
+        title_label = QLabel("<h2 style='color:#ffffff;'>Update Board</h2>")
+        content_label = QLabel(content or "Not Text")
+        content_label.setTextFormat(Qt.RichText)
+        content_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextBrowserInteraction)
+        content_label.setWordWrap(True)
+        content_label.setOpenExternalLinks(True)
+
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(content_label)
+        scroll_area.setFrameShape(QFrame.NoFrame)
 
-        # Create a widget to hold the form layout
-        form_widget = QWidget()
-        form_layout = QGridLayout(form_widget)  # Use a grid layout for better alignment
+        button_box = QDialogButtonBox()
+        update_button = QPushButton("Close")
+        update_button.clicked.connect(lambda: sys.exit(0))
+        button_box.addButton(update_button, QDialogButtonBox.ActionRole)
 
-        # Add header labels for the form
-        form_layout.addWidget(QLabel("BlendShape"), 0, 0)
-        form_layout.addWidget(QLabel("Value"), 0, 1)
-        form_layout.addWidget(QLabel("Shifting"), 0, 2)
-        form_layout.addWidget(QLabel("Weight"), 0, 3)
-        form_layout.addWidget(QLabel("Max"), 0, 4)
-        form_layout.addWidget(QLabel("Enabled"), 0, 5)
+        layout.addWidget(title_label)
+        layout.addWidget(scroll_area, 1)
+        layout.addWidget(button_box)
 
-        # Store QLineEdit and QCheckBox references
-        self.lineEdits = {}
-        self.checkBoxes = {}
+        dialog.exec()
 
-        # Create input fields for each blend shape
-        double_validator = QDoubleValidator()
-        blendshape_data,_=setup_data()
-        for i, blendshape in enumerate(blendshape_data["BlendShapes"][1:], start=1):  # Start from row 1
-            key = blendshape["k"]
-            v_edit = QLineEdit(str(round(blendshape["v"],2)))
-            v_edit.setValidator(double_validator)
-            s_edit = QLineEdit(str(round(blendshape["s"],2)))
-            s_edit.setValidator(double_validator)
-            w_edit = QLineEdit(str(round(blendshape["w"],2)))
-            w_edit.setValidator(double_validator)
-            max_edit = QLineEdit(str(round(blendshape["max"],2)))
-            max_edit.setValidator(double_validator)
-            e_check = QCheckBox()
-            e_check.setChecked(blendshape["e"])
-
-            # Save references to the QLineEdit and QCheckBox
-            self.lineEdits[key] = (v_edit, s_edit, w_edit, max_edit)
-            self.checkBoxes[key] = e_check
-
-            # Add widgets to the grid layout
-            form_layout.addWidget(QLabel(key), i, 0)  # Blend shape key in column 0
-            form_layout.addWidget(v_edit, i, 1)  # v_edit in column 1
-            form_layout.addWidget(s_edit, i, 2)  # s_edit in column 2
-            form_layout.addWidget(w_edit, i, 3)  # w_edit in column 3
-            form_layout.addWidget(max_edit, i, 4)  # max_edit in column 4
-            form_layout.addWidget(e_check, i, 5)  # e_check in column 5
-
-        # Add the form layout to the scroll area
-        scroll_area.setWidget(form_widget)
-        layout.addWidget(scroll_area)  # Add the scroll area to the dialog layout
-
-        # Add a Save Config button
-        self.save_config_button = QPushButton("Save Config", self.dialog)
-        self.save_config_button.clicked.connect(self.save_data)
-        layout.addWidget(self.save_config_button)
-
-        self.dialog.exec_()
-
-    def flip_x(self, value):
-        g.config["Setting"]["flip_x"] = value
-
-    def flip_y(self, value):
-        g.config["Setting"]["flip_y"] = value
-
-    def set_hand_front(self, value):
-        g.config["Tracking"]["Hand"]["only_front"] = value
-
-    def set_face_block(self, value):
-        g.config["Tracking"]["Face"]["block"] = value
-
-    def update_checkboxes(self):
-        self.flip_x_checkbox.setChecked(g.config["Setting"]["flip_x"])
-        self.flip_y_checkbox.setChecked(g.config["Setting"]["flip_y"])
-        self.checkbox1.setChecked(g.config["Tracking"]["Head"]["enable"])
-        self.checkbox2.setChecked(g.config["Tracking"]["Face"]["enable"])
-        self.checkbox3.setChecked(g.config["Tracking"]["Tongue"]["enable"])
-        self.checkbox4.setChecked(g.config["Tracking"]["Hand"]["enable"])
-        self.checkbox5.setChecked(g.config["Tracking"]["Hand"]["enable_hand_down"])
-        self.checkbox6.setChecked(g.config["Tracking"]["Hand"]["enable_finger_action"])
-        self.controller_checkbox1.setChecked(g.config["Tracking"]["LeftController"]["enable"])
-        self.controller_checkbox2.setChecked(g.config["Tracking"]["RightController"]["enable"])
-        self.mouse_checkbox.setChecked(g.config["Mouse"]["enable"])
-
-    def set_scalar(self, value, axis):
-        slider_value = value / 100.0
-        if axis == "x":
-            g.config["Tracking"]["Hand"]["x_scalar"] = slider_value
-            self.label1.setText(f"x {slider_value:.2f}")
-        elif axis == "y":
-            g.config["Tracking"]["Hand"]["y_scalar"] = slider_value
-            self.label2.setText(f"y {slider_value:.2f}")
-        elif axis == "z":
-            g.config["Tracking"]["Hand"]["z_scalar"] = slider_value
-            self.label3.setText(f"z {slider_value:.2f}")
-        elif axis == "controller_x":
-            g.config["Tracking"]["LeftController"]["base_x"] = slider_value
-            g.config["Tracking"]["RightController"]["base_x"] = -slider_value
-            self.controller_label_x.setText(f"x {slider_value:.2f}")
-        elif axis == "controller_y":
-            g.config["Tracking"]["LeftController"]["base_y"] = slider_value
-            g.config["Tracking"]["RightController"]["base_y"] = slider_value
-            self.controller_label_y.setText(f"y {slider_value:.2f}")
-        elif axis == "controller_z":
-            g.config["Tracking"]["LeftController"]["base_z"] = slider_value
-            g.config["Tracking"]["RightController"]["base_z"] = slider_value
-            self.controller_label_z.setText(f"z {slider_value:.2f}")
-        elif axis == "controller_l":
-            g.config["Tracking"]["LeftController"]["length"] = slider_value
-            g.config["Tracking"]["RightController"]["length"] = slider_value
-            self.controller_label_l.setText(f"l {slider_value:.2f}")
-        elif axis == "mouse_x":
-            g.config["Mouse"]["scalar_x"]=slider_value*100
-            self.mouse_label_x.setText(f"x {int(slider_value*100)}")
-        elif axis == "mouse_y":
-            g.config["Mouse"]["scalar_y"]=slider_value*100
-            self.mouse_label_y.setText(f"y {int(slider_value*100)}")
-        elif axis == "mouse_dx":
-            g.config["Mouse"]["dx"]=slider_value
-            self.mouse_label_dx.setText(f"dx {slider_value:.2f}")
-
-
-    def update_sliders(self):
-        x_scalar = g.config["Tracking"]["Hand"]["x_scalar"]
-        y_scalar = g.config["Tracking"]["Hand"]["y_scalar"]
-        z_scalar = g.config["Tracking"]["Hand"]["z_scalar"]
-        self.slider1.setValue(int(x_scalar * 100))
-        self.slider2.setValue(int(y_scalar * 100))
-        self.slider3.setValue(int(z_scalar * 100))
-        self.label1.setText(f"x {x_scalar:.2f}")
-        self.label2.setText(f"y {y_scalar:.2f}")
-        self.label3.setText(f"z {z_scalar:.2f}")
-
-        controller_x = g.config["Tracking"]["LeftController"]["base_x"]
-        controller_y = g.config["Tracking"]["LeftController"]["base_y"]
-        controller_z = g.config["Tracking"]["LeftController"]["base_z"]
-        controller_l = g.config["Tracking"]["LeftController"]["length"]
-        self.controller_slider_x.setValue(int(controller_x * 100))
-        self.controller_slider_y.setValue(int(controller_y * 100))
-        self.controller_slider_z.setValue(int(controller_z * 100))
-        self.controller_slider_l.setValue(int(controller_l * 100))
-        self.controller_label_x.setText(f"x {controller_x:.2f}")
-        self.controller_label_y.setText(f"y {controller_y:.2f}")
-        self.controller_label_z.setText(f"z {controller_z:.2f}")
-        self.controller_label_l.setText(f"l {controller_l:.2f}")
-
-        mouse_x=g.config["Mouse"]["scalar_x"]
-        mouse_y=g.config["Mouse"]["scalar_y"]
-        mouse_dx=g.config["Mouse"]["dx"]
-        self.mouse_slider_x.setValue(int(mouse_x))
-        self.mouse_slider_y.setValue(int(mouse_y))
-        self.mouse_slider_dx.setValue(int(mouse_dx * 100))
-        self.mouse_label_x.setText(f"x {int(mouse_x)}")
-        self.mouse_label_y.setText(f"y {int(mouse_y)}")
-        self.mouse_label_dx.setText(f"dx {mouse_dx:.2f}")
-
-    def reset_hotkeys(self):
-        stop_hotkeys()
-        apply_hotkeys()
-        if self.video_thread is None:
-            stop_hotkeys()
-
-    def set_tracking_config(self, key, value):
-        if key in g.config["Tracking"]:
-            g.config["Tracking"][key]["enable"] = value
-        if key == "LeftController":
-            g.controller.left_hand.force_enable = value
-        if key == "RightController":
-            g.controller.right_hand.force_enable = value
-
-    def toggle_mouse(self, value):
-        g.config["Mouse"]["enable"] = value
-
-    def toggle_only_in_game(self, value):
-        g.config["Setting"]["only_ingame"] = value
-
-    def update_mouse_only_in_game_name(self, value):
-        g.config["Setting"]["only_ingame_game"] = value
-
-    def toggle_hand_down(self, value):
-        g.config["Tracking"]["Hand"]["enable_hand_down"] = value
-
-    def toggle_finger_action(self, value):
-        g.config["Tracking"]["Hand"]["enable_finger_action"] = value
-
-    def install_checking(self):
-        # Open registry key to get Steam installation path
+    def _store_python_path_in_registry(self, python_path):
         try:
-            with winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"SOFTWARE\WOW6432Node\Valve\Steam",
-                0,
-                winreg.KEY_READ,
-            ) as reg_key:
-                steam_path, _ = winreg.QueryValueEx(reg_key, "InstallPath")
-            steamvr_driver_path = os.path.join(
-                steam_path, "steamapps", "common", "SteamVR", "drivers"
-            )
+            set_python_path(python_path)
+            set_install_path(self.install_path)
 
-            check_steamvr_path = os.path.join(
-                steam_path, "steamapps", "common", "SteamVR", "bin"
-            )
-            if not os.path.exists(check_steamvr_path):
-                check_steamvr_path = None
-
-            vrcfacetracking_path = os.path.join(
-                os.getenv("APPDATA"), "VRCFaceTracking", "CustomLibs"
-            )
-            vrcfacetracking_module_path = os.path.join(
-                vrcfacetracking_path, "VRCFT-MediapipePro.dll"
-            )
-
-            # Check all required paths
-            required_paths = [vrcfacetracking_module_path] + [
-                os.path.join(steamvr_driver_path, driver)
-                for driver in ["vmt", "vrto3d"]
-            ]
-            if all(os.path.exists(path) for path in required_paths):
-                return True, steamvr_driver_path, vrcfacetracking_path, check_steamvr_path
-            else:
-                return False, steamvr_driver_path, vrcfacetracking_path, check_steamvr_path
+            log(f"Stored Python path in config: {python_path}")
+            log(f"Stored install path in config: {self.install_path}")
         except Exception as e:
-            print(f"Error accessing registry or file system: {e}")
-            return False, None, None, None
+            log(f"Error storing paths in config: {e}")
+            raise
 
-    def set_process_priority(self):
-        priority_key = self.priority_selection.currentText()
-        print(priority_key)
-        # Define a mapping of priority indexes to their corresponding priority classes
-        priority_classes = {
-            "IDLE_PRIORITY_CLASS": 0x00000040,
-            "BELOW_NORMAL_PRIORITY_CLASS": 0x00004000,
-            "NORMAL_PRIORITY_CLASS": 0x00000020,  # NORMAL_PRIORITY_CLASS
-            "ABOVE_NORMAL_PRIORITY_CLASS": 0x00008000,
-            "HIGH_PRIORITY_CLASS": 0x00000080,
-            "REALTIME_PRIORITY_CLASS": 0x00000100
-        }
-        # Check if the index is valid
-        if priority_key not in priority_classes:
-            self.display_message("Error","Invalid priority index")
-            return False
-        priority_class = priority_classes[priority_key]
-        current_pid = os.getpid()  # Get the current process ID
-        handle = windll.kernel32.OpenProcess(0x0200 | 0x0400, False, current_pid)  # Open the current process
-        success = windll.kernel32.SetPriorityClass(handle, priority_class)
-        windll.kernel32.CloseHandle(handle)
-        print("Finished setting priority")
-        g.config["Setting"]["priority"] = priority_key
+    def _download_release(self):
+        try:
+            self._stop_current_worker()
+            release_url = None
 
-    def display_message(self,title,message,style=""):
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Critical)
-        msg_box.setText(message)
-        msg_box.setWindowTitle(title)
-        msg_box.setStyleSheet(style)
-        msg_box.exec_()
-        return
-
-    def install_function(self):
-        self.install_state, steamvr_driver_path, vrcfacetracking_path, check_steamvr_path = (
-            self.install_checking()
-        )
-        if check_steamvr_path is not None:
-            self.steamvr_status_label.setText("SteamVR Installed")
-            self.steamvr_status_label.setStyleSheet("color: green; font-weight: bold;")
-        else:
-            self.steamvr_status_label.setText("SteamVR Not Installed")
-            self.steamvr_status_label.setStyleSheet("color: red; font-weight: bold;")
-        if self.install_state:
-            # Uninstall process
-            dll_path = os.path.join(vrcfacetracking_path, "VRCFT-MediapipePro.dll")
-
-            error_occurred = False
-            drivers_to_remove = ["vmt", "vrto3d"]
-            for driver in drivers_to_remove:
-                dir_path = os.path.join(steamvr_driver_path, driver)
-                try:
-                    shutil.rmtree(dir_path)
-                except FileNotFoundError:
-                    pass
-                except Exception as e:
-                    error_occurred = True
-                if os.path.exists(dir_path):
-                    error_occurred = True
-            if error_occurred:
-                self.display_message("Error", "SteamVR is running, Please close SteamVR and try again.")
-                return
+            github_url = GITHUB2_API_URL.format(owner=GITHUB_REPO_OWNER, repo=GITHUB_REPO_NAME)
             try:
-                os.remove(dll_path)
-            except PermissionError:
-                self.display_message("Error", "VRCFT is running, please close VRCFT and try again.")
+                log(f"Attempting to get the latest version from GitHub: {github_url}")
+                response = requests.get(github_url, timeout=3)
+                if response.status_code == 200:
+                    data = response.json()
+                    if "zipball" in data.get('zipball_url', ''):
+                        release_url = data.get('zipball_url')
+                        log(f"Received download URL from GitHub: {release_url}")
+            except Exception as e:
+                log(f"Failed to get version info from GitHub: {str(e)}")
+
+            if not release_url:
+                github_url = GITHUB_API_URL.format(owner=GITHUB_REPO_OWNER, repo=GITHUB_REPO_NAME)
+                try:
+                    log(f"Attempting to get the latest version from GitHub: {github_url}")
+                    response = requests.get(github_url, timeout=5)
+                    if response.status_code == 200:
+                        data = response.json()
+                        if "zipball" in data.get('zipball_url', ''):
+                            release_url = "https://gh-proxy.com/" + data.get('zipball_url')
+                            log(f"Received download URL from GitHub: {release_url}")
+                except Exception as e:
+                    log(f"Failed to get version info from GitHub: {str(e)}")
+
+            if not release_url:
+                log(f"Failed to get info from GitHub")
+                raise
+
+            self.release_zip_path = os.path.join(self.tmp_dir, "release.zip")
+            self._show_progress_dialog("Download Application", "Downloading the latest version...")
+            worker = DownloadWorker(release_url, self.release_zip_path)
+            worker.signals.log.connect(log)
+            worker.signals.progress.connect(self._update_progress)
+            worker.signals.error.connect(self._handle_error)
+            worker.signals.finished.connect(self._extract_release)
+            self._start_worker(worker)
+        except Exception as e:
+            self._handle_error(f"Failed to get release info: {e}")
+
+    def _extract_release(self):
+        log("Extracting release...")
+        extract_path = os.path.join(self.tmp_dir, "extract")
+        final_path = os.path.join(self.install_path, "exvr")
+        os.makedirs(extract_path, exist_ok=True)
+        os.makedirs(final_path, exist_ok=True)
+
+        self._show_progress_dialog("Extract files", "Unzipping application files...")
+        worker = ExtractWorker(self.release_zip_path, extract_path, final_path)
+        worker.signals.log.connect(log)
+        worker.signals.progress.connect(self._update_progress)
+        worker.signals.error.connect(self._handle_error)
+        worker.signals.finished.connect(self._install_requirements)
+        self._start_worker(worker)
+
+    def _install_requirements(self):
+        log("Installing requirements...")
+        requirements_path = os.path.join(self.install_path, "exvr", "requirements.txt")
+        if not os.path.exists(requirements_path):
+            log("Requirements file not found. Skipping installation.")
+            self._register_application()
+            return
+
+        self._show_progress_dialog("Install requirements",
+                                   "Installing Python requirements... (Initial installation may be time-consuming).")
+        worker = InstallWorker(os.path.join(self.install_path, "exvr"), requirements_path)
+        worker.signals.log.connect(log)
+        worker.signals.progress.connect(self._update_progress)
+        worker.signals.error.connect(self._handle_error)
+        worker.signals.finished.connect(self._register_application)
+        self._start_worker(worker)
+
+    def _register_application(self):
+        self._close_progress_dialog()
+        log("Registering application...")
+        try:
+            # 存储安装路径到JSON配置
+            set_install_path(self.install_path)
+
+            # 确保Python路径已存储
+            if self.python_path and os.path.exists(self.python_path):
+                set_python_path(self.python_path)
+
+            log("Application registered successfully.")
+            self._run_application()
+        except Exception as e:
+            self._handle_error(f"Failed to register application: {e}")
+
+    def _check_for_updates(self):
+        log("Checking for updates...")
+        try:
+            remote_version = server_data.get("version")
+
+            if not remote_version:
+                log("Failed to get remote version. Running current version.")
+                self._run_application()
                 return
-            self.install_button.setText("Install Drivers")
-            self.install_button.setStyleSheet("QPushButton { background-color: blue; color: white; }")
-        else:
-            # Install process
-            for driver in ["vmt", "vrto3d"]:
-                source = os.path.join("./drivers", driver)
-                destination = os.path.join(steamvr_driver_path, driver)
-                if not os.path.exists(destination):
-                    shutil.copytree(source, destination)
-            dll_source = os.path.join("./drivers", "VRCFT-MediapipePro.dll")
-            dll_destination = os.path.join(
-                vrcfacetracking_path, "VRCFT-MediapipePro.dll"
-            )
-            if not os.path.exists(dll_destination):
-                os.makedirs(os.path.dirname(dll_destination), exist_ok=True)
-                shutil.copy(dll_source, dll_destination)
-            self.install_button.setText("Uninstall Drivers")
-            self.install_button.setStyleSheet("")
 
-    def toggle_camera(self):
-        self.update_checkboxes()
-        self.update_sliders()
-        self.update_camera_resolution()
-        self.update_camera_fps()
-        if self.video_thread and self.video_thread.isRunning():
-            stop_hotkeys()
-            self.toggle_button.setText("Start Tracking")
-            self.toggle_button.setStyleSheet(
-                "QPushButton { background-color: green; color: white; }"
-            )
-            self.thread_stopped()
-        else:
-            apply_hotkeys()
-            self.toggle_button.setText("Stop Tracking")
-            self.toggle_button.setStyleSheet(
-                "QPushButton { background-color: red; color: white; }"
-            )
-            ip_camera_url = g.config["Setting"]["camera_ip"]
-            selected_camera_name = self.camera_selection.currentText()
-            source = (
-                ip_camera_url
-                if ip_camera_url != ""
-                else self.get_camera_source(selected_camera_name)
-            )
-            self.video_thread = VideoCaptureThread(source,g.config["Setting"]["camera_width"],g.config["Setting"]["camera_height"],g.config["Setting"]["camera_fps"])
-            self.video_thread.frame_ready.connect(self.update_frame)
-            self.video_thread.start()
+            config_path = os.path.join(self.install_path, "exvr", "settings", "config.json")
+            local_version = None
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, "r") as f:
+                        local_version = json.load(f).get("Version")
+                    log(f"Local version: {local_version}")
+                except Exception as e:
+                    log(f"Error reading local config: {e}")
 
-            # controller
-            self.controller_thread = ControllerApp()
-            self.controller_thread.start()
-
-
-        self.show_frame_button.setText("Show Frame")
-
-    def toggle_video_display(self):
-        if self.video_thread:
-            if self.video_thread.show_image:
-                self.video_thread.show_image = False
-                self.show_frame_button.setText("Show Frame")
+            if not local_version or local_version != remote_version:
+                log(f"Update available: Local={local_version}, Remote={remote_version}")
+                reply = ask_question("Have Update",
+                                     f"Have new version ({remote_version}). Do you want to update?")
+                if reply == QMessageBox.Yes:
+                    log("User chose to update.")
+                    self._update_application()
+                else:
+                    self.show_announcement = False
+                    log("User declined update. Running current version.")
+                    self._run_application()
             else:
-                self.video_thread.show_image = True
-                self.show_frame_button.setText("Hide Frame")
-        else:
-            self.show_frame_button.setText("Show Frame")
-        self.image_label.setPixmap(QPixmap())
+                self.show_announcement = False
+                log("Application is up to date.")
+                self._run_application()
+        except Exception as e:
+            log(f"Update check process failed: {e}. Running application.")
+            self._run_application()
 
-    def get_camera_source(self, selected_camera_name):
-        # graph = FilterGraph()
-        devices = enumerate_cameras(cv2.CAP_ANY)
-        # print(dev)
-        for device in devices:
-            if device.index > 1000:
-                device.name += " (MSMF - Discouraged)"
-            else:
-                device.name += " (DSHOW)"
-        for device in devices:
-            if device.name == selected_camera_name:
-                return device.index
-        return 0
+    def _update_application(self):
+        log("Starting application update...")
+        self._download_release()
 
-    def update_frame(self, image):
-        if self.video_thread and self.video_thread.show_image:
-            target_width = self.image_label.width()
-            target_height = self.image_label.height()
+    def _run_application(self):
+        app_log_dir = get_resource_path("logs")
+        os.makedirs(app_log_dir, exist_ok=True)
 
-            scaled_image = image.scaled(
-                target_width,
-                target_height,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
+        log("Preparing to run application...")
+        clean_tmp_folder(self.tmp_dir)
+
+        if self.show_announcement:
+            self._show_announcement_box()
+
+        try:
+            exvr_path = os.path.join(self.install_path, "exvr")
+            venv_path = os.path.join(exvr_path, "venv", "Scripts")
+            main_script = os.path.join(exvr_path, "main.py")
+
+            venv_python = os.path.join(venv_path, "python.exe")
+
+            if not os.path.exists(venv_python):
+                raise FileNotFoundError(f"Virtual environment Python not found at {venv_python}")
+            if not os.path.exists(main_script):
+                raise FileNotFoundError("Main application script not found.")
+
+            log(f"Running command: {venv_python} {main_script}")
+            os.chdir(exvr_path)
+
+            flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_CONSOLE
+
+            log("Using CREATE_NO_WINDOW flag to hide initial console only")
+
+            # 检查是否有-log参数
+            cmd = [venv_python, main_script, "--log-dir", app_log_dir]
+            if self.args.log:
+                cmd.append("-log")
+
+            process = subprocess.Popen(
+                cmd,
+                creationflags=flags,
+                close_fds=True,
+                shell=False,
+                stdin=None,
+                stdout=None,
+                stderr=None
             )
-            self.image_label.setPixmap(QPixmap.fromImage(scaled_image))
-            self.image_label.setAlignment(Qt.AlignCenter)
 
-    def populate_camera_list(self):
-        devices = enumerate_cameras(cv2.CAP_ANY)
-        dshow_devices = []
-        msmf_devices = []
-        for device in devices:
-            if device.index > 1000:
-                device.name += " (MSMF - Discouraged)"
-                msmf_devices.append(device)
-            else:
-                device.name += " (DSHOW)"
-                dshow_devices.append(device)
-        for device in dshow_devices + msmf_devices:
-            self.camera_selection.addItem(device.name)
+            time.sleep(1)
 
-    def populate_resolution_list(self):
-        resolutions = [
-            (160, 90),
-            (160, 120),
-            (320, 180),
-            (320, 240),
-            (640, 360),
-            (640, 480),
-            (800, 450),
-            (800, 600),
-            (1280, 720),
-            (1920, 1080),
-            (2560, 1440),
-            (3840, 2160)
-        ]
-        for width, height in resolutions:
-            gcd = np.gcd(width, height)
-            aspect_ratio = f"{width // gcd}:{height // gcd}"
-            self.camera_resolution_selection.addItem(f"{width} x {height} ({aspect_ratio})", (width, height))
-        config_width = int(g.config["Setting"]["camera_width"])
-        config_height = int(g.config["Setting"]["camera_height"])
-        config_resolution = (config_width, config_height)
-        if config_resolution in resolutions:
-            index = resolutions.index(config_resolution)
-            self.camera_resolution_selection.setCurrentIndex(index)
-        else:
-            self.camera_resolution_selection.setCurrentIndex(0)
+            log("Application launched. Exiting installer.")
+            self._quit_installer()
 
-    def populate_fps_list(self):
-        fps_list = [30,60]
-        for fps in fps_list:
-            self.camera_fps_selection.addItem(f"{fps} FPS")
-        config_fps = int(g.config["Setting"]["camera_fps"])
-        if config_fps in fps_list:
-            index = fps_list.index(config_fps)
-            self.camera_fps_selection.setCurrentIndex(index)
-        else:
-            self.camera_fps_selection.setCurrentIndex(0)
+        except Exception as e:
+            self._handle_error(f"Failed to run application: {e}")
 
-    def update_camera_resolution(self):
-        # Get the currently selected resolution
-        current_resolution = self.camera_resolution_selection.currentData()
-        if current_resolution:
-            width, height = current_resolution
-            g.config["Setting"]["camera_width"] = width
-            g.config["Setting"]["camera_height"] = height
-            print(f"Resolution updated to: {width} x {height}")
+    def _show_announcement_box(self):
+        log("Fetching announcement board...")
+        board_data = server_data.get("board")
+        if not board_data:
+            log("No valid announcement board found")
+            return
 
-    def update_camera_fps(self):
-        # Get the currently selected resolution
-        current_fps = self.camera_fps_selection.currentData()
-        if current_fps:
-            g.config["Setting"]["camera_fps"] = current_fps
-            print(f"FPS updated to: {current_fps}")
+        title = board_data.get("title", "Announcement")
+        text = board_data.get("text", "")
 
-    def update_camera_ip(self, value):
-        g.config["Setting"]["camera_ip"] = value 
+        log(f"Showing announcement: {title}")
 
-    def thread_stopped(self):
-        if self.video_thread:
-            self.video_thread.stop()
-            self.video_thread.wait()
-            self.video_thread = None
-        if self.controller_thread:
-            self.controller_thread.stop()
-            self.controller_thread.wait()
-            self.controller_thread = None
-        self.image_label.setPixmap(QPixmap())
+        dialog = QDialog()
+        dialog.setWindowTitle(title)
+        dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        dialog.setMinimumSize(500, 300)
 
-    def closeEvent(self, event):
-        self.thread_stopped()
-        super().closeEvent(event)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #555555;
+                color: #ffffff;
+                border-radius: 8px;
+            }
+            QLabel {
+                background-color: transparent;
+                color: #ffffff;
+                font-size: 12pt;
+                padding: 10px;
+            }
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QPushButton {
+                min-width: 100px;
+                font-size: 10pt;
+            }
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(10)
+
+        content_label = QLabel(text)
+        content_label.setTextFormat(Qt.RichText)
+        content_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextBrowserInteraction)
+        content_label.setWordWrap(True)
+        content_label.setOpenExternalLinks(True)
+
+        content_label.setStyleSheet("font-size: 12pt;")
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(content_label)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        button_box.accepted.connect(dialog.accept)
+
+        layout.addWidget(QLabel(f"<h2 style='color:#ffffff;'>{title}</h2>"))
+        layout.addWidget(scroll_area, 1)
+        layout.addWidget(button_box)
+
+        dialog.adjustSize()
+
+        max_width = QApplication.primaryScreen().availableGeometry().width() * 0.8
+        max_height = QApplication.primaryScreen().availableGeometry().height() * 0.8
+        dialog.resize(min(dialog.width(), max_width), min(dialog.height(), max_height))
+
+        dialog.exec()
+
+    def _show_progress_dialog(self, title, label):
+        self._close_progress_dialog()
+        self.progress_dialog = QProgressDialog(label, "Cancel", 0, 100, None)
+        self.progress_dialog.setWindowTitle(title)
+        self.progress_dialog.setWindowModality(Qt.WindowModal)
+        self.progress_dialog.setAutoClose(False)
+        self.progress_dialog.setAutoReset(False)
+
+        self.progress_dialog.canceled.connect(self._handle_cancel_click)
+
+        self.progress_dialog.setValue(0)
+        self.progress_dialog.show()
+        self.app.processEvents()
+
+    def _handle_cancel_click(self):
+        log("Cancel button clicked by user.")
+        self.user_cancelled = True
+        if self.current_worker:
+            self.current_worker.stop()
+        self._close_progress_dialog()
+        show_info_message("Cancelled", "The operation has been canceled by the user.")
+        self._quit_installer()
+
+    def _update_progress(self, value):
+        if self.progress_dialog and not self.user_cancelled:
+            self.progress_dialog.setValue(value)
+            self.app.processEvents()
+
+    def _close_progress_dialog(self):
+        if self.progress_dialog:
+            try:
+                self.progress_dialog.canceled.disconnect()
+            except:
+                pass
+
+            self.progress_dialog.close()
+            self.progress_dialog = None
+
+    def _handle_error(self, message):
+        log(f"Handling error: {message}")
+        self._close_progress_dialog()
+        if self.current_worker:
+            self.current_worker.stop()
+        show_error_message("Installation Error", message)
+        self._quit_installer()
+
+    def _quit_installer(self):
+        log("Quitting installer application.")
+        self._stop_current_worker()  # <== 新增
+        clean_tmp_folder(self.tmp_dir)
+        self.app.quit()
+
+def get_server_data():
+    global server_data
+    for url in UPDATE_CHECK_URLS:
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                server_data = response.json()
+        except Exception as e:
+            log(f"get server data error: {e}")
+
+def main():
+    get_server_data()
+    args = parse_arguments()
+
+    setup_logging(args)
+
+    log("Main function started.")
+    try:
+        QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    except AttributeError:
+        pass
+
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+
+    app.setStyleSheet(modern_qss)
+
+    installer = SilentInstaller(app, args)
+    QTimer.singleShot(100, installer.run)
+
+    sys.exit(app.exec())
+
+
+def show_admin_warning():
+    app = QApplication(sys.argv)
+
+    msg_box = QMessageBox()
+    msg_box.setWindowTitle("Permission Required")
+    msg_box.setIcon(QMessageBox.Warning)
+    msg_box.setText("Administrator Privileges Required / 需要管理员权限")
+    msg_box.setStandardButtons(QMessageBox.Cancel)
+    msg_box.button(QMessageBox.Cancel).setText("Cancel")
+    msg_box.setDefaultButton(QMessageBox.Cancel)
+    msg_box.setMinimumSize(400, 200)
+    result = msg_box.exec()
 
 if __name__ == "__main__":
     if not pyuac.isUserAdmin():
-        pyuac.runAsAdmin()
+        try:
+            pyuac.runAsAdmin()
+        except:
+            print("This program requires administrative privileges to run.")
+            show_admin_warning()
         sys.exit(0)
     else:
-        app = QApplication(sys.argv)
-        window = VideoWindow()
-        window.show()
-        sys.exit(app.exec_())
+        main()
