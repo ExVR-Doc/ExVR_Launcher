@@ -14,7 +14,8 @@ from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
 
-#pyinstaller --name ExVR_Launcher --onefile --windowed --icon=./res/logo.ico --upx-dir=D:\software\upx-4.2.4-win64 launcher.py
+# pyinstaller --name ExVR_Launcher --onefile --windowed --icon=./res/logo.ico --upx-dir=D:\software\upx-4.2.4-win64 launcher.py
+# pyinstaller --name ExVR_Launcher --onefile --windowed --uac-admin --icon=./res/logo.ico --upx-dir=D:\software\upx-4.2.4-win64 launcher.py
 
 def get_config_file_path():
     return get_resource_path("exvr_config.json")
