@@ -14,6 +14,8 @@ from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
 
+#pyinstaller --name ExVR_Launcher --onefile --windowed --icon=./res/logo.ico --upx-dir=D:\software\upx-4.2.4-win64 launcher.py
+
 def get_config_file_path():
     return get_resource_path("exvr_config.json")
 
@@ -39,6 +41,17 @@ def save_config(config):
         log(f"Error saving config: {e}")
         raise
 
+def delete_config():
+    config_path = get_config_file_path()
+    try:
+        if os.path.exists(config_path):
+            os.remove(config_path)
+            log(f"Config deleted: {config_path}")
+        else:
+            log("Config file does not exist.")
+    except Exception as e:
+        log(f"Error deleting config: {e}")
+        raise
 APP_NAME = "EXVR"
 APP_REG_PATH = r"SOFTWARE\EXVR"
 PYTHON_VERSION = "3.11"
@@ -653,7 +666,9 @@ class InstallWorker(QThread):
                 # 使用ExVR注册表中的Python解释器
                 python_path = self._get_python_from_registry()
                 if not python_path:
+                    delete_config()
                     raise Exception("Python interpreter not found in ExVR registry")
+
 
                 self.process = subprocess.Popen(
                     [python_path, "-m", "venv", venv_path],
