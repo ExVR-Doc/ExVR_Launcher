@@ -1,10 +1,6 @@
 import os
 import sys
 import pyuac
-
-if not pyuac.isUserAdmin():
-    pyuac.runAsAdmin()
-    sys.exit(0)
 import json
 import time
 import shutil
@@ -17,6 +13,31 @@ import argparse
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
+
+def get_config_file_path():
+    return get_resource_path("exvr_config.json")
+
+def load_config():
+    config_path = get_config_file_path()
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            log(f"Error loading config: {e}")
+    return {}
+
+
+def save_config(config):
+    config_path = get_config_file_path()
+    try:
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        log(f"Config saved to: {config_path}")
+    except Exception as e:
+        log(f"Error saving config: {e}")
+        raise
 
 APP_NAME = "EXVR"
 APP_REG_PATH = r"SOFTWARE\EXVR"
@@ -40,35 +61,8 @@ LAU_VERSION = 1
 LAU_MAPPING = {
     "modules\\palm_detection_lite.tflite": "mediapipe\\modules\\palm_detection\\palm_detection_lite.tflite",
     "modules\\hand_landmark_tracking_cpu.binarypb": "mediapipe\\modules\\hand_landmark\\hand_landmark_tracking_cpu.binarypb",
-
 }
-
-
-def get_config_file_path():
-    return get_resource_path("exvr_config.json")
-
-
-def load_config():
-    config_path = get_config_file_path()
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            log(f"Error loading config: {e}")
-    return {}
-
-
-def save_config(config):
-    config_path = get_config_file_path()
-    try:
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        with open(config_path, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-        log(f"Config saved to: {config_path}")
-    except Exception as e:
-        log(f"Error saving config: {e}")
-        raise
+server_data = {}
 
 
 def get_install_path():
@@ -897,25 +891,12 @@ class SilentInstaller:
         except Exception as e:
             self._handle_error(f"Failed to install Python: {e}")
 
+
     def _check_lau_update(self):
         log("check lau version...")
         try:
-            remote_lau_version = None
-            remote_lau_board = None
-
-            for url in UPDATE_CHECK_URLS:
-                try:
-                    response = requests.get(url, timeout=5)
-                    if response.status_code == 200:
-                        data = response.json()
-                        remote_lau_version = data.get("lau_version")
-                        remote_lau_board = data.get("lau_board")
-                        log(data)
-                        if remote_lau_version is not None:
-                            log(f"remote lau version: {remote_lau_version}")
-                            break
-                except Exception as e:
-                    log(f"lau error: {e}")
+            remote_lau_version = server_data.get("lau_version")
+            remote_lau_board = server_data.get("lau_board")
 
             if remote_lau_version is not None and remote_lau_version > LAU_VERSION:
                 log(f"Launcher have update ({remote_lau_version})")
@@ -1076,21 +1057,7 @@ class SilentInstaller:
     def _check_for_updates(self):
         log("Checking for updates...")
         try:
-            remote_version = None
-            for url in UPDATE_CHECK_URLS:
-                try:
-                    response = requests.get(url, timeout=5)
-
-                    log(response.text)
-                    if response.status_code == 200:
-                        data = response.json()
-                        remote_version = data.get("version")
-                        if remote_version:
-                            log(f"Remote version: {remote_version}")
-                            break
-                except Exception as e:
-                    log(f"Error checking update from {url}: {e}")
-                    continue
+            remote_version = server_data.get("version")
 
             if not remote_version:
                 log("Failed to get remote version. Running current version.")
@@ -1115,9 +1082,11 @@ class SilentInstaller:
                     log("User chose to update.")
                     self._update_application()
                 else:
+                    self.show_announcement = False
                     log("User declined update. Running current version.")
                     self._run_application()
             else:
+                self.show_announcement = False
                 log("Application is up to date.")
                 self._run_application()
         except Exception as e:
@@ -1180,32 +1149,9 @@ class SilentInstaller:
         except Exception as e:
             self._handle_error(f"Failed to run application: {e}")
 
-    # 在 SilentInstaller 类中添加以下方法
     def _show_announcement_box(self):
         log("Fetching announcement board...")
-        board_data = None
-
-        for url in UPDATE_CHECK_URLS:
-            try:
-                response = requests.get(url, timeout=5)
-                if response.status_code == 200:
-                    data = response.json()
-                    board_data = data.get("board")
-                    if board_data and isinstance(board_data, dict):
-                        title = board_data.get("title", "")
-                        text = board_data.get("text", "")
-                        if title or text:
-                            log(f"Found valid announcement board at {url}")
-                            break
-                        else:
-                            log("Announcement board is empty, skipping")
-                            board_data = None
-                            break
-                    else:
-                        log("No valid board data found")
-            except Exception as e:
-                log(f"Failed to get announcement from {url}: {e}")
-
+        board_data = server_data.get("board")
         if not board_data:
             log("No valid announcement board found")
             return
@@ -1326,8 +1272,18 @@ class SilentInstaller:
         clean_tmp_folder(self.tmp_dir)
         self.app.quit()
 
+def get_server_data():
+    global server_data
+    for url in UPDATE_CHECK_URLS:
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                server_data = response.json()
+        except Exception as e:
+            log(f"get server data error: {e}")
 
 def main():
+    get_server_data()
     args = parse_arguments()
 
     setup_logging(args)
@@ -1350,4 +1306,33 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if not pyuac.isUserAdmin():
+        print("This program requires administrative privileges to run.")
+
+
+        def show_admin_warning():
+            app = QApplication(sys.argv)
+
+            msg_box = QMessageBox()
+            msg_box.setWindowTitle("权限提示")
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setText("需要管理员权限")
+            msg_box.setInformativeText(
+                "请右键点击程序图标\n"
+                "选择'以管理员身份运行'"
+            )
+
+            msg_box.setStandardButtons(QMessageBox.Ok)
+            msg_box.button(QMessageBox.Ok).setText("退出程序")
+            msg_box.setDefaultButton(QMessageBox.Ok)
+
+            msg_box.setMinimumSize(400, 200)
+
+            result = msg_box.exec()
+
+            sys.exit(0)
+
+
+        show_admin_warning()
+    else:
+        main()
