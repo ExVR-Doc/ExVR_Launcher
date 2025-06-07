@@ -994,21 +994,35 @@ class SilentInstaller:
         try:
             self._stop_current_worker()
             release_url = None
-            github_url = GITHUB_API_URL.format(owner=GITHUB_REPO_OWNER, repo=GITHUB_REPO_NAME)
+
+            github_url = GITHUB2_API_URL.format(owner=GITHUB_REPO_OWNER, repo=GITHUB_REPO_NAME)
             try:
                 log(f"Attempting to get the latest version from GitHub: {github_url}")
-                response = requests.get(github_url, timeout=5)
+                response = requests.get(github_url, timeout=3)
                 if response.status_code == 200:
                     data = response.json()
                     if "zipball" in data.get('zipball_url', ''):
-                        release_url = "https://gh-proxy.com/" + data.get('zipball_url')
+                        release_url = data.get('zipball_url')
                         log(f"Received download URL from GitHub: {release_url}")
             except Exception as e:
                 log(f"Failed to get version info from GitHub: {str(e)}")
 
             if not release_url:
-                release_url = github_url
-                log(f"Using default download URL: {release_url}")
+                github_url = GITHUB_API_URL.format(owner=GITHUB_REPO_OWNER, repo=GITHUB_REPO_NAME)
+                try:
+                    log(f"Attempting to get the latest version from GitHub: {github_url}")
+                    response = requests.get(github_url, timeout=5)
+                    if response.status_code == 200:
+                        data = response.json()
+                        if "zipball" in data.get('zipball_url', ''):
+                            release_url = "https://gh-proxy.com/" + data.get('zipball_url')
+                            log(f"Received download URL from GitHub: {release_url}")
+                except Exception as e:
+                    log(f"Failed to get version info from GitHub: {str(e)}")
+
+            if not release_url:
+                log(f"Failed to get info from GitHub")
+                raise
 
             self.release_zip_path = os.path.join(self.tmp_dir, "release.zip")
             self._show_progress_dialog("Download Application", "Downloading the latest version...")
