@@ -1,6 +1,9 @@
 import os
 import sys
 import pyuac
+if not pyuac.isUserAdmin():
+    pyuac.runAsAdmin()
+    sys.exit(0)
 import json
 import time
 import shutil
@@ -1334,27 +1337,5 @@ def main():
 
     sys.exit(app.exec())
 
-
-def show_admin_warning():
-    app = QApplication(sys.argv)
-
-    msg_box = QMessageBox()
-    msg_box.setWindowTitle("Permission Required")
-    msg_box.setIcon(QMessageBox.Warning)
-    msg_box.setText("Administrator Privileges Required / 需要管理员权限")
-    msg_box.setStandardButtons(QMessageBox.Cancel)
-    msg_box.button(QMessageBox.Cancel).setText("Cancel")
-    msg_box.setDefaultButton(QMessageBox.Cancel)
-    msg_box.setMinimumSize(400, 200)
-    result = msg_box.exec()
-
 if __name__ == "__main__":
-    if not pyuac.isUserAdmin():
-        try:
-            pyuac.runAsAdmin()
-        except:
-            print("This program requires administrative privileges to run.")
-            show_admin_warning()
-        sys.exit(0)
-    else:
-        main()
+    main()
