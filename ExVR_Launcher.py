@@ -1195,15 +1195,40 @@ class SilentInstaller:
 
         try:
             exvr_path = os.path.join(self.install_path, "exvr")
+            python_path = os.path.join(self.install_path, "python")
             venv_path = os.path.join(exvr_path, "venv", "Scripts")
             main_script = os.path.join(exvr_path, "main.py")
-
             venv_python = os.path.join(venv_path, "python.exe")
-
+            requirements_file = os.path.join(exvr_path, "requirements.txt")
+            if not os.path.exists(python_path):
+                raise FileNotFoundError(f"Python not found at {python_path}")
             if not os.path.exists(venv_python):
                 raise FileNotFoundError(f"Virtual environment Python not found at {venv_python}")
             if not os.path.exists(main_script):
                 raise FileNotFoundError("Main application script not found.")
+            if not os.path.exists(requirements_file):
+                raise FileNotFoundError("Requirements not found.")
+
+            result = subprocess.run(
+                [venv_python, "-m", "pip", "list", "--format=json"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=3
+            )
+            installed = {pkg["name"].lower(): pkg["version"] for pkg in json.loads(result.stdout)}
+            required = {}
+            from packaging.requirements import Requirement
+            with open(requirements_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        req = Requirement(line)
+                        required[req.name.lower()] = req
+            for name, req in required.items():
+                if name not in installed:
+                    log(f"Required packages missing: {name}")
+                    raise
 
             log(f"Running command: {venv_python} {main_script}")
             os.chdir(exvr_path)
@@ -1233,6 +1258,7 @@ class SilentInstaller:
             self._quit_installer()
 
         except Exception as e:
+            delete_config()
             self._handle_error(f"Failed to run application: {e}")
 
     def _show_announcement_box(self):
@@ -1358,20 +1384,7 @@ class SilentInstaller:
         clean_tmp_folder(self.tmp_dir)
         self.app.quit()
 
-def get_server_data():
-    global server_data
-    for url in UPDATE_CHECK_URLS:
-        try:
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                log(f"Get Json form {url}")
-                server_data = response.json()
-                break
-        except Exception as e:
-            log(f"get server data error: {e}")
-
 def main():
-    get_server_data()
     args = parse_arguments()
 
     setup_logging(args)
