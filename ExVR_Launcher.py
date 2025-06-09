@@ -65,7 +65,6 @@ GITHUB_API_URL = "https://gh-proxy.com/https://api.github.com/repos/{owner}/{rep
 UPDATE_CHECK_URLS = [
     "https://gh-proxy.com/raw.githubusercontent.com/ExVR-Doc/ExVR-Doc.github.io/main/docs/exvrserverdata.json",
     "https://gh-proxy.com/https://raw.githubusercontent.com/ExVR-Doc/ExVR-Doc.github.io/main/docs/exvrserverdata.json",
-    "https://hub.gitmirror.com/https://raw.githubusercontent.com/ExVR-Doc/ExVR-Doc.github.io/main/docs/exvrserverdata.json",
     "https://raw.githubusercontent.com/ExVR-Doc/ExVR-Doc.github.io/main/docs/exvrserverdata.json"
 ]
 GITHUB_REPO_OWNER = "xiaofeiyu0723"
@@ -840,6 +839,7 @@ class SilentInstaller:
         worker.signals.finished.connect(self._install_python)
         self._start_worker(worker)
 
+
     def _install_python(self):
         self._close_progress_dialog()
         log("Installing Python...")
@@ -850,10 +850,64 @@ class SilentInstaller:
         log(f"Created Python installation directory: {python_install_dir}")
 
         try:
-            log("Have admin rights, installing directly...")
+            import winreg
+            key_path = r"SOFTWARE\Python\PythonCore\3.11"
+            try:
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
+                version_value, value_type = winreg.QueryValueEx(key, "Version")
+                python_installed = True
+                log(f"Found Python 3.11 version: {version_value} in registry.")
+                winreg.CloseKey(key)
+            except FileNotFoundError:
+                log("Python 3.11 key not found in registry. 1")
+                try:
+                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
+                    version_value, value_type = winreg.QueryValueEx(key, "Version")
+                    python_installed = True
+                    log(f"Found Python 3.11 version: {version_value} in registry.")
+                    winreg.CloseKey(key)
+                except FileNotFoundError:
+                    log("Python 3.11 key not found in registry. 2")
+                    python_installed = False
+                except Exception as e:
+                    log(f"Error reading Version value: {e}")
+                    python_installed = False
+            except Exception as e:
+                log(f"Error reading Version value: {e}")
+                python_installed = False
+        except Exception as e:
+            log(f"Registry access error: {e}")
+            python_installed = False
 
+        try:
             installer_path = normalize_path(self.python_installer_path)
             target_dir = quote_path_if_needed(python_install_dir)
+
+            if python_installed:
+                repair_cmd = [installer_path, "/passive", "/repair"]
+                log(f"Attempting repair: {' '.join(repair_cmd)}")
+                repair_process = subprocess.Popen(
+                    repair_cmd,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                repair_process.wait()
+                repair_success = (repair_process.returncode == 0)
+
+                if repair_success:
+                    log("Repair successful. Proceeding to uninstall...")
+                    uninstall_cmd = [installer_path, "/passive", "/uninstall"]
+                    log(f"Attempting uninstall: {' '.join(uninstall_cmd)}")
+                    uninstall_process = subprocess.Popen(
+                        uninstall_cmd,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    uninstall_process.wait()
+
+            log("Have admin rights, installing directly...")
 
             cmd_args = [
                 installer_path,
@@ -909,7 +963,6 @@ class SilentInstaller:
 
         except Exception as e:
             self._handle_error(f"Failed to install Python: {e}")
-
 
     def _check_lau_update(self):
         log("check lau version...")
@@ -1006,7 +1059,7 @@ class SilentInstaller:
                 if response.status_code == 200:
                     data = response.json()
                     if "zipball" in data.get('zipball_url', ''):
-                        release_url = data.get('zipball_url')
+                        release_url = "https://gh-proxy.com/" + data.get('zipball_url')
                         log(f"Received download URL from GitHub: {release_url}")
             except Exception as e:
                 log(f"Failed to get version info from GitHub: {str(e)}")
@@ -1019,7 +1072,7 @@ class SilentInstaller:
                     if response.status_code == 200:
                         data = response.json()
                         if "zipball" in data.get('zipball_url', ''):
-                            release_url = "https://gh-proxy.com/" +  data.get('zipball_url')
+                            release_url = data.get('zipball_url')
                             log(f"Received download URL from GitHub: {release_url}")
                 except Exception as e:
                     log(f"Failed to get version info from GitHub: {str(e)}")
@@ -1311,7 +1364,9 @@ def get_server_data():
         try:
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
+                log(f"Get Json form {url}")
                 server_data = response.json()
+                break
         except Exception as e:
             log(f"get server data error: {e}")
 
