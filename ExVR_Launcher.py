@@ -1,9 +1,9 @@
-import os
 import sys
 import pyuac
 if not pyuac.isUserAdmin():
     pyuac.runAsAdmin()
     sys.exit(0)
+import os
 import json
 import time
 import shutil
