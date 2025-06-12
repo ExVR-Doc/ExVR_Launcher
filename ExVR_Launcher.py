@@ -1213,8 +1213,7 @@ class SilentInstaller:
                 [venv_python, "-m", "pip", "list", "--format=json"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                timeout=3
+                text=True
             )
             installed = {pkg["name"].lower(): pkg["version"] for pkg in json.loads(result.stdout)}
             required = {}
