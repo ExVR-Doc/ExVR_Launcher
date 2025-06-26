@@ -20,6 +20,7 @@ from PySide6.QtGui import *
 # pyinstaller --name ExVR_Launcher --onefile --windowed --icon=./res/logo.ico --upx-dir=D:\software\upx-4.2.4-win64 launcher.py
 # pyinstaller --name ExVR_Launcher --onefile --windowed --uac-admin --icon=./res/logo.ico --upx-dir=D:\software\upx-4.2.4-win64 launcher.py
 
+
 def get_config_file_path():
     return get_resource_path("exvr_config.json")
 
@@ -31,6 +32,7 @@ def load_config():
                 return json.load(f)
         except Exception as e:
             log(f"Error loading config: {e}")
+            return {}
     return {}
 
 
@@ -79,7 +81,13 @@ LAU_MAPPING = {
     "modules\\hand_landmark_tracking_cpu.binarypb": "mediapipe\\modules\\hand_landmark\\hand_landmark_tracking_cpu.binarypb",
 }
 server_data = {}
-
+release = "live"
+PIP_MIRRORS = [
+    "https://pypi.tuna.tsinghua.edu.cn/simple",
+    "https://mirrors.aliyun.com/pypi/simple/",
+    "http://pypi.mirrors.ustc.edu.cn/simple/",
+    "https://pypi.mirrors.ustc.edu.cn/simple/"
+]
 
 def get_install_path():
     config = load_config()
@@ -94,6 +102,7 @@ def get_python_path():
 def set_install_path(path):
     config = load_config()
     config["InstallPath"] = path
+    config["release"] = "live"
     save_config(config)
 
 
@@ -672,7 +681,6 @@ class InstallWorker(QThread):
                     delete_config()
                     raise Exception("Python interpreter not found in ExVR registry")
 
-
                 self.process = subprocess.Popen(
                     [python_path, "-m", "venv", venv_path],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
@@ -692,41 +700,62 @@ class InstallWorker(QThread):
             if not os.path.exists(self.requirements_path): raise FileNotFoundError(
                 f"requirements.txt not found: {self.requirements_path}")
 
-            self.signals.log.emit(f"Installing requirements from {self.requirements_path} using Tsinghua mirror...")
-            self.process = subprocess.Popen(
-                [pip_path, "install", "-i", "https://pypi.tuna.tsinghua.edu.cn/simple", "-r", self.requirements_path],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
+            install_success = False
+            full_error_output = ""
 
-            progress = 0
-            while self._is_running:
-                line = self.process.stdout.readline()
-                if not line and self.process.poll() is not None:
+            for i, mirror in enumerate(PIP_MIRRORS):
+                self.signals.log.emit(
+                    f"Attempting to install requirements from {self.requirements_path} using mirror: {mirror} ({i + 1}/{len(PIP_MIRRORS)})...")
+
+                cmd = [pip_path, "install", "-i", mirror, "-r", self.requirements_path]
+
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+
+                output_lines = []
+                progress = 0
+                while self._is_running:
+                    line = self.process.stdout.readline()
+                    if not line and self.process.poll() is not None:
+                        break
+                    if line:
+                        output_lines.append(line)
+                        self.signals.log.emit(line.strip())
+                        if "Collecting" in line:
+                            progress = min(progress + 2, 90)
+                            self.signals.progress.emit(progress)
+                        elif "Installing" in line:
+                            progress = min(progress + 1, 95)
+                            self.signals.progress.emit(progress)
+
+                if not self._is_running:
+                    return
+
+                self.process.wait()
+
+                if self.process.returncode == 0:
+                    self.signals.log.emit(f"Requirements installation completed successfully using mirror: {mirror}.")
+                    install_success = True
                     break
-                if line:
-                    self.signals.log.emit(line.strip())
-                    # Increment progress based on output
-                    if "Collecting" in line:
-                        progress = min(progress + 2, 90)
-                        self.signals.progress.emit(progress)
-                    elif "Installing" in line:
-                        progress = min(progress + 1, 95)
-                        self.signals.progress.emit(progress)
+                else:
+                    current_error_output = "".join(output_lines)
+                    full_error_output += f"\n--- Error from mirror {mirror} ---\n{current_error_output}"
+                    self.signals.log.emit(
+                        f"Requirements installation failed with return code {self.process.returncode} using mirror: {mirror}.")
+                    if i == len(PIP_MIRRORS) - 1:
+                        raise Exception(f"All attempts to install requirements failed. Last error: {full_error_output}")
 
-            if not self._is_running: return
-
-            if self.process.returncode == 0:
-                self.signals.log.emit("Requirements installation completed successfully.")
+            if install_success:
                 self.signals.log.emit("Extraction completed, starting module file replacement")
                 replace_modules_with_json(self.install_path)
                 self.signals.progress.emit(100)
                 self.signals.finished.emit()
             else:
-                error_msg = f"Requirements installation failed with return code {self.process.returncode}"
-                self.signals.log.emit(error_msg)
-                self.signals.error.emit(error_msg)
-
+                # This should ideally not be reached if the loop handles failures correctly
+                raise Exception("All attempts to install requirements failed unexpectedly.")
 
         except Exception as e:
             self.signals.log.emit(f"Installation error: {e}")
@@ -760,7 +789,7 @@ class SilentInstaller:
         log("Starting silent installer...")
         try:
             if self._check_lau_update():
-                log("laut update")
+                log("lau update")
             self.install_path = get_install_path()
             self.python_path = get_python_path()
             if self.install_path and self.python_path:
@@ -1051,7 +1080,6 @@ class SilentInstaller:
         try:
             self._stop_current_worker()
             release_url = None
-
             github_url = GITHUB_API_URL.format(owner=GITHUB_REPO_OWNER, repo=GITHUB_REPO_NAME)
             try:
                 log(f"Attempting to get the latest version from GitHub: {github_url}")
@@ -1383,7 +1411,33 @@ class SilentInstaller:
         clean_tmp_folder(self.tmp_dir)
         self.app.quit()
 
+def get_server_data():
+    global server_data
+    for url in UPDATE_CHECK_URLS:
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                log(f"Get Json form {url}")
+                server_data = response.json()
+                break
+        except Exception as e:
+            log(f"get server data error: {e}")
+
 def main():
+    global release
+    config = load_config()
+    if config.get("release") is None:
+        release = "live"
+    else:
+        release = config.get("release")
+
+    if release == "beta":
+        log(f"release is beta")
+        UPDATE_CHECK_URLS = []
+        GITHUB_API_URL = ""
+        GITHUB2_API_URL = ""
+
+    get_server_data()
     args = parse_arguments()
 
     setup_logging(args)
